@@ -3,7 +3,9 @@
 Project Aegis - LLM Analyst
 Sends forensics data to Groq and returns a structured verdict + summary.
 """
-
+import sys
+sys.path.insert(0, '/usr/lib/python3/dist-packages')
+sys.path.insert(0, '/usr/local/lib/python3.13/dist-packages')
 import json
 import re
 from groq import Groq

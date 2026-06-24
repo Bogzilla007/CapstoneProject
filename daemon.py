@@ -15,6 +15,8 @@ from datetime import datetime
 from collections import defaultdict
 import config
 from llm_analyst import analyze_threat
+from mitigation import handle_verdict
+from system_checks import get_full_system_snapshot
 
 def get_system_telemetry():
     uptime_seconds = time.time() - psutil.boot_time()
@@ -86,6 +88,7 @@ def gather_forensics(ip, failed_count, raw_log_lines):
     whois_data = run_whois(ip)
     geo_data = run_geoip(ip)
     process_snapshot = run_process_snapshot()
+    system_snapshot = get_full_system_snapshot()
     forensics = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "attacker_ip": ip,
@@ -94,7 +97,10 @@ def gather_forensics(ip, failed_count, raw_log_lines):
         "geo": geo_data,
         "whois": whois_data,
         "process_snapshot": process_snapshot,
-        "system_telemetry": telemetry
+        "system_telemetry": telemetry,
+        "open_ports": system_snapshot["open_ports"],
+        "active_users": system_snapshot["active_users"],
+        "running_services": system_snapshot["running_services"]
     }
     return forensics
 
@@ -118,6 +124,7 @@ def save_reports(forensics, verdict=None):
             "action": verdict.get("action", "N/A") if verdict else "PENDING",
             "summary": verdict.get("summary", "") if verdict else ""
         })
+
     with open(config.TEXT_REPORT_PATH, "a") as f:
         f.write("=" * 70 + "\n")
         f.write(f"INCIDENT REPORT — {forensics['timestamp']}\n")
@@ -131,6 +138,15 @@ def save_reports(forensics, verdict=None):
             f.write(f"Severity       : {verdict.get('severity', 'N/A')}\n")
             f.write(f"Action         : {verdict.get('action', 'N/A')}\n")
             f.write(f"AI Summary     : {verdict.get('summary', '')}\n")
+        f.write(f"\nOpen Ports at Time of Attack:\n")
+        for p in forensics.get("open_ports", []):
+            f.write(f"  Port {p.get('port','?'):6} | {p.get('address','?')}\n")
+        f.write(f"\nActive Users at Time of Attack:\n")
+        for u in forensics.get("active_users", []):
+            f.write(f"  {u.get('user','?')} on {u.get('terminal','?')} from {u.get('source','?')}\n")
+        f.write(f"\nRunning Services at Time of Attack:\n")
+        for s in forensics.get("running_services", []):
+            f.write(f"  {s.get('name','?'):30} | {s.get('description','?')}\n")
         f.write(f"\nProcess Snapshot:\n{forensics['process_snapshot']}\n")
         f.write(f"\nRaw Log Sample:\n{forensics['raw_log_sample']}\n")
         f.write("=" * 70 + "\n\n")
@@ -148,6 +164,7 @@ def run_daemon():
     triggered_ips = set()
     ip_log_lines = defaultdict(list)
     last_telemetry_time = 0
+    last_syscheck_time = 0
 
     with open(config.AUTH_LOG_PATH, "r") as log_file:
         log_file.seek(0, 2)
@@ -155,10 +172,18 @@ def run_daemon():
 
         while True:
             now = time.time()
+
             if now - last_telemetry_time >= config.TELEMETRY_INTERVAL:
                 telemetry = get_system_telemetry()
                 print_telemetry(telemetry)
                 last_telemetry_time = now
+
+            if now - last_syscheck_time >= 300:
+                snapshot = get_full_system_snapshot()
+                port_list = [p.get('port','?') for p in snapshot['open_ports']]
+                user_list = [u.get('user','?') for u in snapshot['active_users']]
+                print(f"  [SYS] Open ports: {port_list} | Active users: {user_list}")
+                last_syscheck_time = now
 
             line = log_file.readline()
             if not line:
@@ -186,6 +211,7 @@ def run_daemon():
                 forensics = gather_forensics(ip, attempt_count, ip_log_lines[ip])
                 verdict = analyze_threat(forensics)
                 save_reports(forensics, verdict)
+                handle_verdict(ip, verdict, forensics)
                 print(f"\n  [+] VERDICT: {verdict['severity']} — {verdict['action']}")
                 print(f"  [+] {verdict['summary']}")
                 print(f"  [+] Reports saved. Check reports/ folder.\n")
