@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
 Project Aegis - Main Daemon
-Monitors /var/log/auth.log for SSH brute force attempts
-and triggers the forensics pipeline on threshold breach.
+Monitors /var/log/auth.log for SSH brute force attempts and triggers
+the forensics pipeline on threshold breach.
+
+Thread 1: Rule Engine      - 0.5s tick, Layer 1 brute force detection
+Thread 2: Collector        - 10s tick, feeds ML detector + CSV
+Thread 3: ML Inference     - 10s tick, Layer 2 LSTM anomaly detection
+Thread 4: Trainer          - 60min or 200 new rows, background retrainer
 """
 
 import time
@@ -11,12 +16,20 @@ import psutil
 import re
 import csv
 import os
+import threading
 from datetime import datetime
 from collections import defaultdict
+
 import config
 from llm_analyst import analyze_threat
 from mitigation import handle_verdict
 from system_checks import get_full_system_snapshot
+import collector
+import ml_detector
+import trainer
+
+# Shared state
+incident_lock = threading.Lock()
 
 def get_system_telemetry():
     uptime_seconds = time.time() - psutil.boot_time()
@@ -82,8 +95,8 @@ def run_process_snapshot():
     except Exception as e:
         return f"Process snapshot failed: {e}"
 
-def gather_forensics(ip, failed_count, raw_log_lines):
-    print(f"\n[!] SENTINEL TRIGGERED — Gathering forensics on {ip}")
+def gather_forensics(ip, failed_count, raw_log_lines, extra_context=None):
+    print(f"\n[!] SENTINEL TRIGGERED - Gathering forensics on {ip}")
     telemetry = get_system_telemetry()
     whois_data = run_whois(ip)
     geo_data = run_geoip(ip)
@@ -93,7 +106,7 @@ def gather_forensics(ip, failed_count, raw_log_lines):
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "attacker_ip": ip,
         "failed_attempts": failed_count,
-        "raw_log_sample": "\n".join(raw_log_lines[-10:]),
+        "raw_log_sample": "\n".join(raw_log_lines[-10:]) if raw_log_lines else "N/A",
         "geo": geo_data,
         "whois": whois_data,
         "process_snapshot": process_snapshot,
@@ -102,6 +115,8 @@ def gather_forensics(ip, failed_count, raw_log_lines):
         "active_users": system_snapshot["active_users"],
         "running_services": system_snapshot["running_services"]
     }
+    if extra_context:
+        forensics.update(extra_context)
     return forensics
 
 def save_reports(forensics, verdict=None):
@@ -124,27 +139,32 @@ def save_reports(forensics, verdict=None):
             "action": verdict.get("action", "N/A") if verdict else "PENDING",
             "summary": verdict.get("summary", "") if verdict else ""
         })
-
     with open(config.TEXT_REPORT_PATH, "a") as f:
         f.write("=" * 70 + "\n")
-        f.write(f"INCIDENT REPORT — {forensics['timestamp']}\n")
+        f.write(f"INCIDENT REPORT - {forensics['timestamp']}\n")
         f.write("=" * 70 + "\n")
-        f.write(f"Attacker IP    : {forensics['attacker_ip']}\n")
-        f.write(f"Failed Attempts: {forensics['failed_attempts']}\n")
-        f.write(f"Country        : {forensics['geo'].get('country', 'Unknown')}\n")
-        f.write(f"ISP            : {forensics['geo'].get('isp', 'Unknown')}\n")
-        f.write(f"Org            : {forensics['geo'].get('org', 'Unknown')}\n")
+        f.write(f"Attacker IP     : {forensics['attacker_ip']}\n")
+        f.write(f"Detection Label : {forensics.get('detection_label', 'BRUTE_FORCE')}\n")
+        f.write(f"Failed Attempts : {forensics['failed_attempts']}\n")
+        f.write(f"Country         : {forensics['geo'].get('country', 'Unknown')}\n")
+        f.write(f"ISP             : {forensics['geo'].get('isp', 'Unknown')}\n")
+        f.write(f"Org             : {forensics['geo'].get('org', 'Unknown')}\n")
+        if "anomaly_score" in forensics:
+            f.write(f"Anomaly Score   : {forensics['anomaly_score']}\n")
+            f.write(f"Anomaly Thresh  : {forensics['anomaly_threshold']}\n")
+            f.write(f"ML Phase        : {forensics.get('ml_phase', 'N/A')}\n")
+            f.write(f"Detection Desc  : {forensics.get('detection_description', '')}\n")
         if verdict:
-            f.write(f"Severity       : {verdict.get('severity', 'N/A')}\n")
-            f.write(f"Action         : {verdict.get('action', 'N/A')}\n")
-            f.write(f"AI Summary     : {verdict.get('summary', '')}\n")
-        f.write(f"\nOpen Ports at Time of Attack:\n")
+            f.write(f"Severity        : {verdict.get('severity', 'N/A')}\n")
+            f.write(f"Action          : {verdict.get('action', 'N/A')}\n")
+            f.write(f"AI Summary      : {verdict.get('summary', '')}\n")
+        f.write("\nOpen Ports at Time of Attack:\n")
         for p in forensics.get("open_ports", []):
             f.write(f"  Port {p.get('port','?'):6} | {p.get('address','?')}\n")
-        f.write(f"\nActive Users at Time of Attack:\n")
+        f.write("\nActive Users at Time of Attack:\n")
         for u in forensics.get("active_users", []):
             f.write(f"  {u.get('user','?')} on {u.get('terminal','?')} from {u.get('source','?')}\n")
-        f.write(f"\nRunning Services at Time of Attack:\n")
+        f.write("\nRunning Services at Time of Attack:\n")
         for s in forensics.get("running_services", []):
             f.write(f"  {s.get('name','?'):30} | {s.get('description','?')}\n")
         f.write(f"\nProcess Snapshot:\n{forensics['process_snapshot']}\n")
@@ -152,69 +172,150 @@ def save_reports(forensics, verdict=None):
         f.write("=" * 70 + "\n\n")
     print(f"  [+] Reports saved to {config.CSV_REPORT_PATH} and {config.TEXT_REPORT_PATH}")
 
-def run_daemon():
-    print("=" * 70)
-    print("  PROJECT AEGIS — Autonomous EDR Daemon")
-    print(f"  Monitoring: {config.AUTH_LOG_PATH}")
-    print(f"  Threshold : {config.FAILED_LOGIN_THRESHOLD} failures in {config.TIME_WINDOW_SECONDS}s")
-    print(f"  Dry Run   : {config.DRY_RUN}")
-    print("=" * 70)
+def run_pipeline(ip, label, failed_count=0, raw_log_lines=None, extra_context=None):
+    if raw_log_lines is None:
+        raw_log_lines = []
+    ec = {"detection_label": label}
+    if extra_context:
+        ec.update(extra_context)
+    forensics = gather_forensics(ip, failed_count, raw_log_lines, extra_context=ec)
+    verdict = analyze_threat(forensics)
+    save_reports(forensics, verdict)
+    handle_verdict(ip, verdict, forensics)
+    print(f"\n  [+] VERDICT: {verdict['severity']} - {verdict['action']}")
+    print(f"  [+] {verdict['summary']}")
+    print(f"  [+] Reports saved. Check reports/ folder.\n")
 
+def rule_engine_thread():
+    print("[RULE ENGINE] Starting - tailing auth.log")
     failed_attempts = defaultdict(list)
     triggered_ips = set()
     ip_log_lines = defaultdict(list)
     last_telemetry_time = 0
     last_syscheck_time = 0
-
     with open(config.AUTH_LOG_PATH, "r") as log_file:
         log_file.seek(0, 2)
-        print("\n[*] Daemon running. Watching for attacks...\n")
-
+        print("\n[RULE ENGINE] Watching for attacks...\n")
         while True:
             now = time.time()
-
             if now - last_telemetry_time >= config.TELEMETRY_INTERVAL:
                 telemetry = get_system_telemetry()
                 print_telemetry(telemetry)
                 last_telemetry_time = now
-
             if now - last_syscheck_time >= 300:
                 snapshot = get_full_system_snapshot()
-                port_list = [p.get('port','?') for p in snapshot['open_ports']]
-                user_list = [u.get('user','?') for u in snapshot['active_users']]
+                port_list = [p.get("port", "?") for p in snapshot["open_ports"]]
+                user_list = [u.get("user", "?") for u in snapshot["active_users"]]
                 print(f"  [SYS] Open ports: {port_list} | Active users: {user_list}")
                 last_syscheck_time = now
-
             line = log_file.readline()
             if not line:
                 time.sleep(0.5)
                 continue
-
             ip = parse_failed_login(line)
             if not ip:
                 continue
-
             current_time = time.time()
             failed_attempts[ip].append(current_time)
             ip_log_lines[ip].append(line.strip())
-
             failed_attempts[ip] = [
                 t for t in failed_attempts[ip]
                 if current_time - t <= config.TIME_WINDOW_SECONDS
             ]
-
             attempt_count = len(failed_attempts[ip])
-            print(f"  [~] Failed login from {ip} — {attempt_count}/{config.FAILED_LOGIN_THRESHOLD} in window")
-
+            print(f"  [~] Failed login from {ip} - {attempt_count}/{config.FAILED_LOGIN_THRESHOLD} in window")
             if attempt_count >= config.FAILED_LOGIN_THRESHOLD and ip not in triggered_ips:
                 triggered_ips.add(ip)
-                forensics = gather_forensics(ip, attempt_count, ip_log_lines[ip])
-                verdict = analyze_threat(forensics)
-                save_reports(forensics, verdict)
-                handle_verdict(ip, verdict, forensics)
-                print(f"\n  [+] VERDICT: {verdict['severity']} — {verdict['action']}")
-                print(f"  [+] {verdict['summary']}")
-                print(f"  [+] Reports saved. Check reports/ folder.\n")
+                trainer.register_incident()
+                threading.Thread(
+                    target=run_pipeline,
+                    args=(ip, "BRUTE_FORCE"),
+                    kwargs={
+                        "failed_count": attempt_count,
+                        "raw_log_lines": ip_log_lines[ip],
+                        "extra_context": {
+                            "fail_count": attempt_count,
+                            "window_seconds": config.TIME_WINDOW_SECONDS
+                        }
+                    },
+                    daemon=True
+                ).start()
+
+ML_INFERENCE_INTERVAL = 10
+
+def ml_inference_thread():
+    print("[ML INFERENCE] Starting")
+    time.sleep(15)
+    while True:
+        try:
+            result = ml_detector.check_for_anomaly()
+            if result is None:
+                phase = ml_detector.get_status().get('phase', 'UNKNOWN')
+                print(f"[ML INFERENCE] Phase: {phase} - waiting for model")
+            else:
+                score, is_anomaly = result
+                phase = ml_detector.get_status().get('phase', 'UNKNOWN')
+                print(f"[ML INFERENCE] Score: {score:.6f} | Threshold: {ml_detector.get_status().get('threshold', 0):.6f} | Phase: {phase}")
+                if is_anomaly:
+                    print(f"[ML INFERENCE] *** ML_ANOMALY DETECTED *** Score={score:.6f}")
+                    trainer.register_incident()
+                    extra = {
+                        "anomaly_score": round(float(score), 6),
+                        "anomaly_threshold": round(float(ml_detector.get_status().get('threshold', 0)), 6),
+                        "ml_phase": phase,
+                        "detection_description": (
+                            "Behavioral anomaly detected by AI model. "
+                            f"Reconstruction error {score:.6f} exceeds threshold {ml_detector.get_status().get('threshold', 0):.6f}."
+                        )
+                    }
+                    threading.Thread(
+                        target=run_pipeline,
+                        args=("0.0.0.0", "ML_ANOMALY"),
+                        kwargs={
+                            "failed_count": 0,
+                            "raw_log_lines": [],
+                            "extra_context": extra
+                        },
+                        daemon=True
+                    ).start()
+        except Exception as e:
+            print(f"[ML INFERENCE] Error: {e}")
+        time.sleep(ML_INFERENCE_INTERVAL)
+
+def print_banner():
+    print("=" * 70)
+    print("  PROJECT AEGIS - Autonomous Security Monitoring Daemon")
+    print(f"  Started   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Log File  : {config.AUTH_LOG_PATH}")
+    print(f"  Threshold : {config.FAILED_LOGIN_THRESHOLD} failures in {config.TIME_WINDOW_SECONDS}s")
+    print(f"  Dry Run   : {config.DRY_RUN}")
+    print("=" * 70)
+    print("  Thread 1  : Rule Engine   (Layer 1 - Brute Force, 0.5s tick)")
+    print("  Thread 2  : Collector     (Layer 2 - Data feed, 10s tick)")
+    print("  Thread 3  : ML Inference  (Layer 2 - LSTM Anomaly, 10s tick)")
+    print("  Thread 4  : Trainer       (Layer 2 - Self-improving, 60min)")
+    print("=" * 70)
+
+def main():
+    print_banner()
+    collector.start()
+    print("[MAIN] Thread 2 (Collector) started")
+    trainer.start()
+    print("[MAIN] Thread 4 (Trainer) started")
+    t_ml = threading.Thread(target=ml_inference_thread, name="ML-Inference", daemon=True)
+    t_ml.start()
+    print("[MAIN] Thread 3 (ML Inference) started")
+    t_rule = threading.Thread(target=rule_engine_thread, name="Rule-Engine", daemon=True)
+    t_rule.start()
+    print("[MAIN] Thread 1 (Rule Engine) started")
+    print("[MAIN] All threads live. Aegis is defending.\n")
+    try:
+        while True:
+            time.sleep(60)
+            living = [t.name for t in threading.enumerate() if t.is_alive()]
+            print(f"[HEARTBEAT] Active threads: {living}")
+    except KeyboardInterrupt:
+        print("\n[MAIN] Shutdown signal received. Stopping Aegis.")
 
 if __name__ == "__main__":
-    run_daemon()
+    main()
