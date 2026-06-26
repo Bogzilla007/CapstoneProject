@@ -26,6 +26,7 @@ from mitigation import handle_verdict
 from system_checks import get_full_system_snapshot
 import collector
 import log_parser
+import threat_tracker
 import ml_detector
 import trainer
 
@@ -239,6 +240,23 @@ def rule_engine_thread():
             username = parsed.get("username", "unknown")
             print(f"  [~] Failed login from {ip} (user: {username}) - {attempt_count}/{config.FAILED_LOGIN_THRESHOLD} in window")
 
+            # Layer 3 — record every fail and check slow/distributed
+            threat_tracker.record_fail(ip)
+            layer3_hits = threat_tracker.evaluate(ip)
+            for hit in layer3_hits:
+                print(f"  [L3] {hit['label']} detected for {ip}")
+                trainer.register_incident()
+                threading.Thread(
+                    target=run_pipeline,
+                    args=(ip, hit['label']),
+                    kwargs={
+                        "failed_count": attempt_count,
+                        "raw_log_lines": ip_log_lines[ip],
+                        "extra_context": hit['extra_context']
+                    },
+                    daemon=True
+                ).start()
+
             if attempt_count >= config.FAILED_LOGIN_THRESHOLD and ip not in triggered_ips:
                 triggered_ips.add(ip)
                 trainer.register_incident()
@@ -319,6 +337,35 @@ def ml_inference_thread():
             print(f"[ML INFERENCE] Error: {e}")
         time.sleep(ML_INFERENCE_INTERVAL)
 
+
+PORT_CHECK_INTERVAL = 60
+
+def port_watcher_thread():
+    """Checks for new open ports every 60s against baseline."""
+    print("[PORT WATCHER] Starting")
+    while True:
+        time.sleep(PORT_CHECK_INTERVAL)
+        try:
+            new_ports, ports_set = threat_tracker.check_new_ports()
+            if new_ports:
+                print(f"[PORT WATCHER] *** NEW_PORT_DETECTED *** {ports_set}")
+                trainer.register_incident()
+                threading.Thread(
+                    target=run_pipeline,
+                    args=("0.0.0.0", "NEW_PORT_DETECTED"),
+                    kwargs={
+                        "failed_count": 0,
+                        "raw_log_lines": [],
+                        "extra_context": {
+                            "detection_label": "NEW_PORT_DETECTED",
+                            "new_ports": list(ports_set)
+                        }
+                    },
+                    daemon=True
+                ).start()
+        except Exception as e:
+            print(f"[PORT WATCHER] Error: {e}")
+
 def print_banner():
     print("=" * 70)
     print("  PROJECT AEGIS - Autonomous Security Monitoring Daemon")
@@ -331,10 +378,12 @@ def print_banner():
     print("  Thread 2  : Collector     (Layer 2 - Data feed, 10s tick)")
     print("  Thread 3  : ML Inference  (Layer 2 - LSTM Anomaly, 10s tick)")
     print("  Thread 4  : Trainer       (Layer 2 - Self-improving, 60min)")
+    print("  Thread 5  : Port Watcher  (Layer 3 - New port detection, 60s)")
     print("=" * 70)
 
 def main():
     print_banner()
+    threat_tracker.initialize_port_baseline()
     collector.start()
     print("[MAIN] Thread 2 (Collector) started")
     trainer.start()
@@ -342,6 +391,9 @@ def main():
     t_ml = threading.Thread(target=ml_inference_thread, name="ML-Inference", daemon=True)
     t_ml.start()
     print("[MAIN] Thread 3 (ML Inference) started")
+    t_port = threading.Thread(target=port_watcher_thread, name="Port-Watcher", daemon=True)
+    t_port.start()
+    print("[MAIN] Thread 5 (Port Watcher) started")
     t_rule = threading.Thread(target=rule_engine_thread, name="Rule-Engine", daemon=True)
     t_rule.start()
     print("[MAIN] Thread 1 (Rule Engine) started")
