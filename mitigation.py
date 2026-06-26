@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Project Aegis - Active Mitigation & Discord Alerting
-Handles ufw blocking and Discord webhook notifications.
+Handles ufw blocking, auto-expiry, and tiered Discord notifications.
 """
 
 import subprocess
 import requests
 import json
 import os
+import time
 from datetime import datetime
 import config
 
@@ -16,34 +17,82 @@ import config
 BLOCKLIST_PATH = "reports/blocklist.txt"
 
 def load_blocklist():
-    """Returns set of already blocked IPs."""
+    """Returns dict of ip -> {severity, timestamp, expiry} for all blocked IPs."""
     if not os.path.exists(BLOCKLIST_PATH):
-        return set()
+        return {}
+    entries = {}
     with open(BLOCKLIST_PATH, "r") as f:
-        return set(line.strip().split(",")[0] for line in f if line.strip())
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            ip = parts[0]
+            entries[ip] = {
+                "severity": parts[1] if len(parts) > 1 else "UNKNOWN",
+                "timestamp": parts[2] if len(parts) > 2 else "",
+                "expiry": float(parts[3]) if len(parts) > 3 else 0,
+                "summary": parts[4] if len(parts) > 4 else ""
+            }
+    return entries
 
-def save_to_blocklist(ip, severity, summary):
-    """Appends a blocked IP to the blocklist log."""
+def is_block_expired(ip):
+    """Returns True if the block for this IP has expired."""
+    entries = load_blocklist()
+    if ip not in entries:
+        return False
+    expiry = entries[ip].get("expiry", 0)
+    if expiry == 0:
+        return False  # permanent block
+    return time.time() > expiry
+
+def save_to_blocklist(ip, severity, summary, expiry_seconds=0):
+    """Appends or updates a blocked IP in the blocklist."""
     os.makedirs("reports", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    expiry_ts = time.time() + expiry_seconds if expiry_seconds > 0 else 0
     with open(BLOCKLIST_PATH, "a") as f:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        f.write(f"{ip},{severity},{timestamp},{summary[:80]}\n")
+        f.write(f"{ip},{severity},{timestamp},{expiry_ts},{summary[:80]}\n")
+
+def get_active_blocks():
+    """Returns dict of IPs that are currently blocked and not expired."""
+    entries = load_blocklist()
+    active = {}
+    for ip, data in entries.items():
+        expiry = data.get("expiry", 0)
+        if expiry == 0 or time.time() < expiry:
+            active[ip] = data
+    return active
 
 # ─── UFW Blocking ──────────────────────────────────────────────────────────────
 
-def block_ip(ip):
+def block_ip(ip, severity="HIGH"):
     """
     Executes ufw deny for the given IP.
-    Respects DRY_RUN mode — logs but does not execute if True.
+    Respects DRY_RUN and auto-expiry from config.BLOCK_EXPIRY.
+    Skips whitelisted IPs.
     """
-    if ip in load_blocklist():
-        print(f"  [*] {ip} is already in blocklist. Skipping.")
+    # Whitelist check
+    whitelist = getattr(config, "IP_WHITELIST", [])
+    if ip in whitelist:
+        print(f"  [*] {ip} is whitelisted — skipping block.")
         return False
+
+    # Already actively blocked?
+    active = get_active_blocks()
+    if ip in active and not is_block_expired(ip):
+        print(f"  [*] {ip} is already actively blocked. Skipping.")
+        return False
+
+    # Get expiry duration for this severity
+    expiry_map = getattr(config, "BLOCK_EXPIRY", {})
+    expiry_seconds = expiry_map.get(severity, 0)
+    expiry_label = f"{expiry_seconds//3600}hr" if expiry_seconds > 0 else "permanent"
 
     if config.DRY_RUN:
         print(f"  [DRY RUN] Would execute: sudo ufw deny from {ip}")
-        print(f"  [DRY RUN] Would add {ip} to blocklist.")
-        save_to_blocklist(ip, "DRY_RUN", "Dry run mode — not actually blocked")
+        print(f"  [DRY RUN] Block duration: {expiry_label}")
+        save_to_blocklist(ip, "DRY_RUN", "Dry run mode", expiry_seconds)
         return True
 
     try:
@@ -52,8 +101,8 @@ def block_ip(ip):
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
-            print(f"  [+] BLOCKED: ufw rule added for {ip}")
-            save_to_blocklist(ip, "BLOCKED", "ufw rule applied")
+            print(f"  [+] BLOCKED: ufw rule added for {ip} ({expiry_label})")
+            save_to_blocklist(ip, severity, "ufw rule applied", expiry_seconds)
             return True
         else:
             print(f"  [!] ufw block failed: {result.stderr}")
@@ -61,6 +110,20 @@ def block_ip(ip):
     except Exception as e:
         print(f"  [!] Block execution error: {e}")
         return False
+
+def unblock_ip(ip):
+    """Removes ufw rule for an expired block."""
+    if config.DRY_RUN:
+        print(f"  [DRY RUN] Would execute: sudo ufw delete deny from {ip}")
+        return
+    try:
+        subprocess.run(
+            ["sudo", "ufw", "delete", "deny", "from", ip],
+            capture_output=True, text=True, timeout=10
+        )
+        print(f"  [+] Unblocked {ip} (block expired)")
+    except Exception as e:
+        print(f"  [!] Unblock error for {ip}: {e}")
 
 # ─── Discord Alerting ──────────────────────────────────────────────────────────
 
@@ -77,55 +140,98 @@ ACTION_EMOJI = {
     "IGNORE":  "✅"
 }
 
-def send_discord_alert(ip, verdict, forensics):
-    """Fires a Discord webhook with the incident details."""
-    if not config.DISCORD_WEBHOOK_URL or config.DISCORD_WEBHOOK_URL == "your_discord_webhook_url_here":
-        print("  [!] Discord webhook not configured. Skipping alert.")
-        return
+SEVERITY_COLOR = {
+    "CRITICAL": 0xFF0000,
+    "HIGH":     0xFF4500,
+    "MEDIUM":   0xFFA500,
+    "LOW":      0x00FF00
+}
 
+def _build_embed(ip, verdict, forensics, include_full_forensics=False):
+    """Build the Discord embed payload."""
     severity = verdict.get("severity", "UNKNOWN")
     action = verdict.get("action", "UNKNOWN")
     summary = verdict.get("summary", "No summary available.")
     geo = forensics.get("geo", {})
+    detection_label = forensics.get("detection_label", "UNKNOWN")
 
     sev_emoji = SEVERITY_EMOJI.get(severity, "⚠️")
     act_emoji = ACTION_EMOJI.get(action, "❓")
 
-    message = {
+    fields = [
+        {"name": "🌐 Attacker IP",      "value": ip,                                         "inline": True},
+        {"name": "🏷️ Detection",         "value": detection_label,                            "inline": True},
+        {"name": "🏳️ Country",           "value": geo.get("country", "Unknown"),              "inline": True},
+        {"name": "🏢 ISP / Org",         "value": geo.get("isp", "Unknown"),                  "inline": True},
+        {"name": "❌ Failed Attempts",   "value": str(forensics.get("failed_attempts", "?")), "inline": True},
+        {"name": "⚡ Severity",          "value": severity,                                   "inline": True},
+        {"name": "🔧 Action Taken",      "value": action,                                     "inline": True},
+        {"name": "📋 AI Summary",        "value": summary[:1000],                             "inline": False},
+    ]
+
+    # Extra threat intel fields if present
+    if forensics.get("detected_usernames"):
+        fields.append({"name": "👤 Usernames Tried", "value": ", ".join(forensics["detected_usernames"]), "inline": True})
+    if forensics.get("timing_pattern"):
+        fields.append({"name": "⏱️ Timing Pattern", "value": forensics["timing_pattern"], "inline": True})
+    if forensics.get("threat_labels"):
+        fields.append({"name": "🏴 Threat Labels", "value": ", ".join(forensics["threat_labels"]), "inline": False})
+    if forensics.get("repeat_offender"):
+        fields.append({"name": "🔁 Repeat Offender", "value": f"Yes — {forensics.get('previous_incident_count', '?')} prior incidents", "inline": True})
+    if forensics.get("anomaly_score"):
+        fields.append({"name": "🤖 ML Anomaly Score", "value": str(forensics["anomaly_score"]), "inline": True})
+
+    if include_full_forensics:
+        open_ports = forensics.get("open_ports", [])
+        port_str = ", ".join(str(p.get("port", "?")) for p in open_ports) or "None"
+        fields.append({"name": "🔌 Open Ports", "value": port_str, "inline": True})
+        active_users = forensics.get("active_users", [])
+        user_str = ", ".join(u.get("user", "?") for u in active_users) or "None"
+        fields.append({"name": "👥 Active Users", "value": user_str, "inline": True})
+
+    return {
+        "title": f"{sev_emoji} {severity} — {detection_label} — {action} {act_emoji}",
+        "color": SEVERITY_COLOR.get(severity, 0x808080),
+        "fields": fields,
+        "footer": {"text": f"Project Aegis EDR • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"},
+        "thumbnail": {"url": "https://i.imgur.com/4M34hi2.png"}
+    }
+
+def send_discord_alert(ip, verdict, forensics):
+    """
+    Tiered Discord alert based on severity.
+    LOW      → log only, no Discord message
+    MEDIUM   → standard embed
+    HIGH     → @here + embed
+    CRITICAL → @here + full forensics embed
+    """
+    if not config.DISCORD_WEBHOOK_URL or config.DISCORD_WEBHOOK_URL == "your_discord_webhook_url_here":
+        print("  [!] Discord webhook not configured. Skipping alert.")
+        return
+
+    severity = verdict.get("severity", "LOW")
+    escalation_map = getattr(config, "DISCORD_ESCALATION", {})
+    escalation = escalation_map.get(severity, "MESSAGE")
+
+    if escalation == "LOG_ONLY":
+        print(f"  [~] Discord: LOW severity — logged only, no message sent.")
+        return
+
+    include_full = escalation == "HERE_FORENSICS"
+    mention = "@here\n" if escalation in ("HERE", "HERE_FORENSICS") else ""
+    embed = _build_embed(ip, verdict, forensics, include_full_forensics=include_full)
+
+    payload = {
         "username": "Project Aegis",
         "avatar_url": "https://i.imgur.com/4M34hi2.png",
-        "embeds": [
-            {
-                "title": f"{sev_emoji} {severity} THREAT DETECTED — {action} {act_emoji}",
-                "color": {
-                    "CRITICAL": 0xFF0000,
-                    "HIGH":     0xFF4500,
-                    "MEDIUM":   0xFFA500,
-                    "LOW":      0x00FF00
-                }.get(severity, 0x808080),
-                "fields": [
-                    {"name": "🌐 Attacker IP",      "value": ip,                                        "inline": True},
-                    {"name": "🏳️ Country",           "value": geo.get("country", "Unknown"),             "inline": True},
-                    {"name": "🏢 ISP / Org",         "value": geo.get("isp", "Unknown"),                 "inline": True},
-                    {"name": "❌ Failed Attempts",   "value": str(forensics.get("failed_attempts", "?")), "inline": True},
-                    {"name": "⚡ Severity",          "value": severity,                                  "inline": True},
-                    {"name": "🔧 Action Taken",      "value": action,                                    "inline": True},
-                    {"name": "📋 AI Summary",        "value": summary,                                   "inline": False},
-                ],
-                "footer": {"text": f"Project Aegis EDR • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"},
-                "thumbnail": {"url": "https://i.imgur.com/4M34hi2.png"}
-            }
-        ]
+        "content": mention,
+        "embeds": [embed]
     }
 
     try:
-        response = requests.post(
-            config.DISCORD_WEBHOOK_URL,
-            json=message,
-            timeout=10
-        )
+        response = requests.post(config.DISCORD_WEBHOOK_URL, json=payload, timeout=10)
         if response.status_code == 204:
-            print(f"  [+] Discord alert sent successfully.")
+            print(f"  [+] Discord alert sent ({escalation}).")
         else:
             print(f"  [!] Discord alert failed: {response.status_code} {response.text}")
     except Exception as e:
@@ -136,17 +242,27 @@ def send_discord_alert(ip, verdict, forensics):
 def handle_verdict(ip, verdict, forensics):
     """
     Master function called by the daemon.
-    Decides whether to block and always sends Discord alert.
+    Checks whitelist, applies block with expiry, sends tiered Discord alert.
     """
     action = verdict.get("action", "IGNORE")
     severity = verdict.get("severity", "LOW")
 
     print(f"\n  [*] Handling verdict: {severity} — {action}")
 
+    # Whitelist check before any action
+    whitelist = getattr(config, "IP_WHITELIST", [])
+    if ip in whitelist:
+        print(f"  [*] {ip} is whitelisted — no action taken.")
+        send_discord_alert(ip, verdict, forensics)
+        return
+
     if action == "BLOCK":
-        blocked = block_ip(ip)
+        blocked = block_ip(ip, severity=severity)
         if blocked:
-            print(f"  [+] IP {ip} has been {'flagged for blocking' if config.DRY_RUN else 'blocked'}.")
+            expiry_map = getattr(config, "BLOCK_EXPIRY", {})
+            expiry_seconds = expiry_map.get(severity, 0)
+            expiry_label = f"{expiry_seconds//3600}hr" if expiry_seconds > 0 else "permanent"
+            print(f"  [+] IP {ip} {'flagged for blocking' if config.DRY_RUN else 'blocked'} ({expiry_label}).")
     elif action == "MONITOR":
         print(f"  [~] Monitoring mode — no block applied for {ip}.")
     else:

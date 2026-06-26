@@ -1,0 +1,17 @@
+{
+  "trained_at": "2026-06-25 07:46:10",
+  "threshold": 0.07274278253316879,
+  "sequence_length": 20,
+  "features": [
+    "cpu_percent",
+    "ram_percent",
+    "failed_logins",
+    "active_users",
+    "open_ports",
+    "hour_of_day"
+  ],
+  "epochs_trained": 49,
+  "final_train_loss": 0.0009815618395805359,
+  "final_val_loss": 0.018500152975320816,
+  "anomaly_percentile": 95
+}

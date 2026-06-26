@@ -29,6 +29,7 @@ import log_parser
 import threat_tracker
 import ml_detector
 import trainer
+import resilience
 
 # Shared state
 incident_lock = threading.Lock()
@@ -379,6 +380,7 @@ def print_banner():
     print("  Thread 3  : ML Inference  (Layer 2 - LSTM Anomaly, 10s tick)")
     print("  Thread 4  : Trainer       (Layer 2 - Self-improving, 60min)")
     print("  Thread 5  : Port Watcher  (Layer 3 - New port detection, 60s)")
+    print("  Thread 6  : Resilience    (Self-defense - UFW integrity 60s / Log tamper 30s)")
     print("=" * 70)
 
 def main():
@@ -397,6 +399,8 @@ def main():
     t_rule = threading.Thread(target=rule_engine_thread, name="Rule-Engine", daemon=True)
     t_rule.start()
     print("[MAIN] Thread 1 (Rule Engine) started")
+    resilience.start_resilience_threads()
+    print("[MAIN] Thread 6 (Resilience) started")
     print("[MAIN] All threads live. Aegis is defending.\n")
     try:
         while True:
