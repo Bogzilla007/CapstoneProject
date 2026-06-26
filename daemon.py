@@ -98,11 +98,33 @@ def run_process_snapshot():
     except Exception as e:
         return f"Process snapshot failed: {e}"
 
+def _is_real_ip(ip):
+    """Returns True if ip is a valid IPv4/IPv6 address. False for placeholder
+    labels like SYSTEM_ANOMALY used by non-network detections (e.g. ML
+    resource anomalies that have no real attacker IP)."""
+    import ipaddress
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+
 def gather_forensics(ip, failed_count, raw_log_lines, extra_context=None):
     print(f"\n[!] SENTINEL TRIGGERED - Gathering forensics on {ip}")
     telemetry = get_system_telemetry()
-    whois_data = run_whois(ip)
-    geo_data = run_geoip(ip)
+
+    if _is_real_ip(ip):
+        whois_data = run_whois(ip)
+        geo_data = run_geoip(ip)
+    else:
+        print(f"  [*] {ip} is not a network address — skipping whois/GeoIP lookups.")
+        whois_data = "N/A — non-network detection (e.g. ML resource anomaly, no real attacker IP)"
+        geo_data = {
+            "country": "N/A", "region": "N/A", "city": "N/A",
+            "isp": "N/A", "org": "N/A", "status": "N/A"
+        }
+
     process_snapshot = run_process_snapshot()
     system_snapshot = get_full_system_snapshot()
     forensics = {
@@ -299,7 +321,15 @@ def rule_engine_thread():
 
 ML_INFERENCE_INTERVAL = 10
 
+# ML_ANOMALY pipeline trigger cooldown — prevents re-firing the full
+# Groq pipeline every tick while a sustained anomaly stays above threshold.
+ML_ANOMALY_COOLDOWN_SECONDS = 300  # 5 minutes, matches trainer.py blackout window
+_last_ml_anomaly_trigger = 0
+_ml_anomaly_lock = threading.Lock()
+
+
 def ml_inference_thread():
+    global _last_ml_anomaly_trigger
     print("[ML INFERENCE] Starting")
     time.sleep(15)
     while True:
@@ -315,25 +345,33 @@ def ml_inference_thread():
                 if is_anomaly:
                     print(f"[ML INFERENCE] *** ML_ANOMALY DETECTED *** Score={score:.6f}")
                     trainer.register_incident()
-                    extra = {
-                        "anomaly_score": round(float(score), 6),
-                        "anomaly_threshold": round(float(ml_detector.get_status().get('threshold', 0)), 6),
-                        "ml_phase": phase,
-                        "detection_description": (
-                            "Behavioral anomaly detected by AI model. "
-                            f"Reconstruction error {score:.6f} exceeds threshold {ml_detector.get_status().get('threshold', 0):.6f}."
-                        )
-                    }
-                    threading.Thread(
-                        target=run_pipeline,
-                        args=("0.0.0.0", "ML_ANOMALY"),
-                        kwargs={
-                            "failed_count": 0,
-                            "raw_log_lines": [],
-                            "extra_context": extra
-                        },
-                        daemon=True
-                    ).start()
+
+                    with _ml_anomaly_lock:
+                        now = time.time()
+                        seconds_since_last = now - _last_ml_anomaly_trigger
+                        if seconds_since_last < ML_ANOMALY_COOLDOWN_SECONDS:
+                            print(f"[ML INFERENCE] Cooldown active ({seconds_since_last:.0f}s/{ML_ANOMALY_COOLDOWN_SECONDS}s) — skipping pipeline trigger, anomaly already logged.")
+                        else:
+                            _last_ml_anomaly_trigger = now
+                            extra = {
+                                "anomaly_score": round(float(score), 6),
+                                "anomaly_threshold": round(float(ml_detector.get_status().get('threshold', 0)), 6),
+                                "ml_phase": phase,
+                                "detection_description": (
+                                    "Behavioral anomaly detected by AI model. "
+                                    f"Reconstruction error {score:.6f} exceeds threshold {ml_detector.get_status().get('threshold', 0):.6f}."
+                                )
+                            }
+                            threading.Thread(
+                                target=run_pipeline,
+                                args=("SYSTEM_ANOMALY", "ML_ANOMALY"),
+                                kwargs={
+                                    "failed_count": 0,
+                                    "raw_log_lines": [],
+                                    "extra_context": extra
+                                },
+                                daemon=True
+                            ).start()
         except Exception as e:
             print(f"[ML INFERENCE] Error: {e}")
         time.sleep(ML_INFERENCE_INTERVAL)
