@@ -2,78 +2,112 @@
 """
 Project Aegis - LLM Analyst
 Sends forensics data to Groq and returns a structured verdict + summary.
+Session 16: enriched with AbuseIPDB context, auto-escalation, and a
+rule-based fallback classifier for when Groq is down or returns garbage.
 """
 import sys
-sys.path.insert(0, '/usr/lib/python3/dist-packages')
-sys.path.insert(0, '/usr/local/lib/python3.13/dist-packages')
+sys.path.insert(0, "/usr/lib/python3/dist-packages")
+sys.path.insert(0, "/usr/local/lib/python3.13/dist-packages")
 import json
 import re
 from groq import Groq
 import config
+import threat_intel
 
 client = Groq(api_key=config.GROQ_API_KEY)
 
-# ─── Prompt Builder ────────────────────────────────────────────────────────────
+# Prompt Builder
 
-def build_prompt(forensics):
-    """Packages forensics data into a tight prompt for the LLM."""
+def build_prompt(forensics, abuse_data=None):
+    """Packages forensics data (+ optional AbuseIPDB context) into a prompt for the LLM."""
     geo = forensics.get("geo", {})
-    return f"""
+    if abuse_data is None:
+        abuse_data = {}
+
+    telemetry = forensics.get("system_telemetry", {})
+
+    base = f"""
 You are a SOC (Security Operations Center) analyst AI.
 Analyze the following SSH brute-force attack data and respond ONLY with a JSON object.
 Do NOT include any explanation, markdown, or text outside the JSON.
 
 ATTACK DATA:
-- Attacker IP     : {forensics['attacker_ip']}
-- Failed Attempts : {forensics['failed_attempts']}
-- Country         : {geo.get('country', 'Unknown')}
-- Region          : {geo.get('region', 'Unknown')}
-- City            : {geo.get('city', 'Unknown')}
-- ISP             : {geo.get('isp', 'Unknown')}
-- Org             : {geo.get('org', 'Unknown')}
+- Attacker IP     : {forensics.get("attacker_ip", "Unknown")}
+- Failed Attempts : {forensics.get("failed_attempts", "Unknown")}
+- Country         : {geo.get("country", "Unknown")}
+- Region          : {geo.get("region", "Unknown")}
+- City            : {geo.get("city", "Unknown")}
+- ISP             : {geo.get("isp", "Unknown")}
+- Org             : {geo.get("org", "Unknown")}
 
 RAW LOG SAMPLE:
-{forensics['raw_log_sample']}
+{forensics.get("raw_log_sample", "N/A")}
 
 PROCESS SNAPSHOT (SSH processes at time of attack):
-{forensics['process_snapshot']}
+{forensics.get("process_snapshot", "N/A")}
 
 WHOIS DATA:
-{forensics['whois'][:1000]}
+{str(forensics.get("whois", "N/A"))[:1000]}
 
 SYSTEM STATE AT TIME OF ATTACK:
-- Hostname : {forensics['system_telemetry']['hostname']}
-- CPU      : {forensics['system_telemetry']['cpu_percent']}%
-- RAM      : {forensics['system_telemetry']['ram_percent']}%
+- Hostname : {telemetry.get("hostname", "Unknown")}
+- CPU      : {telemetry.get("cpu_percent", "Unknown")}%
+- RAM      : {telemetry.get("ram_percent", "Unknown")}%
+"""
 
+    enrichment = ""
+    if abuse_data:
+        enrichment += f"""
+ABUSEIPDB THREAT INTELLIGENCE:
+- Abuse Confidence Score : {abuse_data.get("abuse_confidence_score", "Unknown")}/100
+- Total Reports          : {abuse_data.get("total_reports", "Unknown")}
+- Reported Country       : {abuse_data.get("country_code", "Unknown")}
+- ISP (AbuseIPDB)        : {abuse_data.get("isp", "Unknown")}
+"""
+
+    if forensics.get("repeat_offender"):
+        count = forensics.get("previous_incident_count", "?")
+        enrichment += "\n- Repeat Offender: Yes, " + str(count) + " prior incidents\n"
+    if forensics.get("detected_usernames"):
+        names = ", ".join(forensics["detected_usernames"])
+        enrichment += "- Usernames Tried: " + names + "\n"
+    if forensics.get("timing_pattern"):
+        enrichment += "- Timing Pattern: " + str(forensics["timing_pattern"]) + "\n"
+    if forensics.get("detection_label"):
+        enrichment += "- Detection Source: " + str(forensics["detection_label"]) + "\n"
+    if forensics.get("threat_labels"):
+        labels = ", ".join(forensics["threat_labels"])
+        enrichment += "- Threat Labels: " + labels + "\n"
+
+    schema = """
 Based on this data, respond ONLY with this exact JSON format:
-{{
+{
   "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
   "action": "BLOCK" | "MONITOR" | "IGNORE",
   "summary": "A 2-3 sentence executive summary of the threat for a security report."
-}}
+}
 
 Rules:
-- CRITICAL + BLOCK if: high attempt count, suspicious ISP/org, known hostile region
-- HIGH + BLOCK if: clear brute force pattern
+- CRITICAL + BLOCK if: high attempt count, suspicious ISP/org, known hostile region, high AbuseIPDB score
+- HIGH + BLOCK if: clear brute force pattern, moderate AbuseIPDB score
 - MEDIUM + MONITOR if: low attempts, residential ISP
 - LOW + IGNORE if: likely benign or internal traffic
 """
 
-# ─── JSON Parser with Fallback ─────────────────────────────────────────────────
+    return base + enrichment + schema
+
+# JSON Parser with Fallback
 
 def parse_verdict(raw_response):
     """
     Extracts JSON from LLM response.
-    Handles cases where model wraps output in markdown fences or adds commentary.
+    Returns None if no valid JSON could be extracted (caller should fall back).
     """
-    # Try direct parse first
     try:
         return json.loads(raw_response.strip())
     except json.JSONDecodeError:
         pass
 
-    # Try extracting JSON from markdown fences
     fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_response, re.DOTALL)
     if fence_match:
         try:
@@ -81,7 +115,6 @@ def parse_verdict(raw_response):
         except json.JSONDecodeError:
             pass
 
-    # Try finding any JSON object in the response
     json_match = re.search(r"\{.*?\}", raw_response, re.DOTALL)
     if json_match:
         try:
@@ -89,25 +122,27 @@ def parse_verdict(raw_response):
         except json.JSONDecodeError:
             pass
 
-    # All parsing failed — return a safe fallback
-    print("  [!] WARNING: Could not parse LLM JSON response. Using fallback verdict.")
-    return {
-        "severity": "HIGH",
-        "action": "BLOCK",
-        "summary": f"LLM parsing failed. Raw response: {raw_response[:200]}"
-    }
+    print("  [!] WARNING: Could not parse LLM JSON response.")
+    return None
 
-# ─── Main Analyst Function ─────────────────────────────────────────────────────
+# Main Analyst Function
 
 def analyze_threat(forensics):
     """
-    Sends forensics data to Groq and returns a clean verdict dict.
-    Returns: {"severity": ..., "action": ..., "summary": ...}
+    Sends forensics data to Groq (enriched with AbuseIPDB context) and
+    returns a clean verdict dict: {"severity": ..., "action": ..., "summary": ...}
+
+    On Groq failure or invalid JSON, falls back to threat_intel.fallback_classify().
+    Verdict severity is auto-escalated based on AbuseIPDB score before returning.
     """
-    print(f"  [*] Sending forensics to Groq ({config.GROQ_MODEL})...")
+    ip = forensics.get("attacker_ip", "unknown")
 
-    prompt = build_prompt(forensics)
+    abuse_data = threat_intel.lookup(ip)
 
+    print("  [*] Sending forensics to Groq (" + str(config.GROQ_MODEL) + ")...")
+    prompt = build_prompt(forensics, abuse_data=abuse_data)
+
+    verdict = None
     try:
         response = client.chat.completions.create(
             model=config.GROQ_MODEL,
@@ -121,27 +156,30 @@ def analyze_threat(forensics):
                     "content": prompt
                 }
             ],
-            temperature=0.1,  # Low temperature for consistent structured output
+            temperature=0.1,
             max_tokens=500
         )
 
         raw = response.choices[0].message.content
-        print(f"  [*] Raw Groq response: {raw[:200]}")
+        print("  [*] Raw Groq response: " + raw[:200])
         verdict = parse_verdict(raw)
-        print(f"  [+] Verdict: {verdict['severity']} — {verdict['action']}")
-        print(f"  [+] Summary: {verdict['summary'][:100]}...")
-        return verdict
 
     except Exception as e:
         print(f"  [!] Groq API error: {e}")
-        return {
-            "severity": "HIGH",
-            "action": "BLOCK",
-            "summary": f"LLM analysis failed due to API error: {str(e)}"
-        }
+        verdict = None
+
+    if verdict is None:
+        verdict = threat_intel.fallback_classify(forensics, abuse_data=abuse_data)
+    else:
+        print("  [+] Verdict: " + str(verdict.get("severity")) + " - " + str(verdict.get("action")))
+        print("  [+] Summary: " + str(verdict.get("summary", ""))[:100] + "...")
+
+    verdict = threat_intel.maybe_escalate(verdict, abuse_data)
+
+    return verdict
 
 
-# ─── Standalone Test ───────────────────────────────────────────────────────────
+# Standalone Test
 
 if __name__ == "__main__":
     print("[*] Testing LLM analyst with mock forensics data...\n")
@@ -164,8 +202,13 @@ if __name__ == "__main__":
             "hostname": "kali",
             "cpu_percent": 12.5,
             "ram_percent": 51.0
-        }
+        },
+        "detected_usernames": ["root", "admin"],
+        "timing_pattern": "AUTOMATED_TOOL",
+        "detection_label": "BRUTE_FORCE",
+        "threat_labels": ["AUTOMATED_ATTACK"]
     }
 
     verdict = analyze_threat(mock_forensics)
-    print(f"\nFinal Verdict:\n{json.dumps(verdict, indent=2)}")
+    print("\nFinal Verdict:")
+    print(json.dumps(verdict, indent=2))

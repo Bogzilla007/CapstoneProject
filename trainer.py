@@ -37,7 +37,11 @@ META_PATH     = os.path.join(MODEL_DIR, "metadata.json")
 INCIDENTS_CSV = os.path.join(BASE_DIR, "reports", "incidents.csv")
 
 # Temp paths for atomic swap
-MODEL_TMP  = MODEL_PATH  + ".tmp"
+# NOTE: MODEL_TMP must still end in .keras — Keras' model.save() validates
+# the literal save path's extension, so "aegis_model.keras.tmp" is rejected.
+# Inserting .tmp before the extension keeps it a valid Keras path while
+# still being a distinct file for the atomic rename below.
+MODEL_TMP  = os.path.join(MODEL_DIR, "aegis_model.tmp.keras")
 SCALER_TMP = SCALER_PATH + ".tmp"
 META_TMP   = META_PATH   + ".tmp"
 
