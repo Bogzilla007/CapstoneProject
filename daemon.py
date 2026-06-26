@@ -25,6 +25,7 @@ from llm_analyst import analyze_threat
 from mitigation import handle_verdict
 from system_checks import get_full_system_snapshot
 import collector
+import log_parser
 import ml_detector
 import trainer
 
@@ -191,6 +192,7 @@ def rule_engine_thread():
     failed_attempts = defaultdict(list)
     triggered_ips = set()
     ip_log_lines = defaultdict(list)
+    ip_parsed_events = defaultdict(list)
     last_telemetry_time = 0
     last_syscheck_time = 0
     with open(config.AUTH_LOG_PATH, "r") as log_file:
@@ -212,9 +214,19 @@ def rule_engine_thread():
             if not line:
                 time.sleep(0.5)
                 continue
-            ip = parse_failed_login(line)
-            if not ip:
+
+            parsed = log_parser.parse_line(line)
+            ip = parsed.get("ip")
+            event_type = parsed.get("event_type")
+
+            # Track all parsed events per IP for threat classification
+            if ip:
+                ip_parsed_events[ip].append(parsed)
+
+            # Only count failed logins toward brute force threshold
+            if event_type != "FAILED_LOGIN" or not ip:
                 continue
+
             current_time = time.time()
             failed_attempts[ip].append(current_time)
             ip_log_lines[ip].append(line.strip())
@@ -222,20 +234,45 @@ def rule_engine_thread():
                 t for t in failed_attempts[ip]
                 if current_time - t <= config.TIME_WINDOW_SECONDS
             ]
+
             attempt_count = len(failed_attempts[ip])
-            print(f"  [~] Failed login from {ip} - {attempt_count}/{config.FAILED_LOGIN_THRESHOLD} in window")
+            username = parsed.get("username", "unknown")
+            print(f"  [~] Failed login from {ip} (user: {username}) - {attempt_count}/{config.FAILED_LOGIN_THRESHOLD} in window")
+
             if attempt_count >= config.FAILED_LOGIN_THRESHOLD and ip not in triggered_ips:
                 triggered_ips.add(ip)
                 trainer.register_incident()
+
+                # Full threat classification
+                threat_intel = log_parser.classify_threat(
+                    ip,
+                    ip_parsed_events[ip],
+                    failed_attempts[ip]
+                )
+
+                # Pick the most severe label
+                extra_labels = threat_intel.get("threat_labels", [])
+                if "BREACH_SUSPECTED" in extra_labels:
+                    label = "BREACH_SUSPECTED"
+                elif "PRIV_ESC_ATTEMPT" in extra_labels:
+                    label = "PRIV_ESC_ATTEMPT"
+                else:
+                    label = "BRUTE_FORCE"
+
+                print(f"  [!] Threat labels: {extra_labels}")
+                print(f"  [!] Usernames tried: {threat_intel.get('detected_usernames')}")
+                print(f"  [!] Timing pattern: {threat_intel.get('timing_pattern')}")
+
                 threading.Thread(
                     target=run_pipeline,
-                    args=(ip, "BRUTE_FORCE"),
+                    args=(ip, label),
                     kwargs={
                         "failed_count": attempt_count,
                         "raw_log_lines": ip_log_lines[ip],
                         "extra_context": {
                             "fail_count": attempt_count,
-                            "window_seconds": config.TIME_WINDOW_SECONDS
+                            "window_seconds": config.TIME_WINDOW_SECONDS,
+                            **threat_intel
                         }
                     },
                     daemon=True
