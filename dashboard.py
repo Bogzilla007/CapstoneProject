@@ -111,10 +111,11 @@ def get_telemetry():
     }
 
 def load_incidents():
-    if not os.path.exists(config.CSV_REPORT_PATH):
+    csv_path = os.path.join(BASE_DIR, 'reports', 'incidents.csv')
+    if not os.path.exists(csv_path):
         return pd.DataFrame()
     try:
-        df = pd.read_csv(config.CSV_REPORT_PATH)
+        df = pd.read_csv(csv_path)
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         return df
