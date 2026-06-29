@@ -199,7 +199,7 @@ RETRAINING  → background retrain, old model still live
 | `mitigation.py` | block_ip(), unblock_ip(), tiered Discord, auto-expiry blocklist |
 | `resilience.py` | UFW integrity check, log tamper detection |
 | `system_checks.py` | open ports (ss), active users (who), running services (systemctl) |
-| `dashboard.py` | 5-tab Streamlit SOC dashboard |
+| `dashboard.py` | 5-tab native PySide6 desktop SOC dashboard |
 | `config.py` | All keys, thresholds, paths, whitelist, expiry map (gitignored) |
 | `config.example.py` | Safe template for repo |
 

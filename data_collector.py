@@ -11,9 +11,12 @@ import subprocess
 import psutil
 from datetime import datetime
 
-DATA_FILE = "ml_data/normal_behavior.csv"
+import config
+import runtime_paths
+
+DATA_FILE = runtime_paths.as_str(runtime_paths.NORMAL_BEHAVIOR_CSV)
 COLLECTION_INTERVAL = 10
-AUTH_LOG_PATH = "/var/log/auth.log"
+AUTH_LOG_PATH = config.AUTH_LOG_PATH
 
 def get_cpu():
     return psutil.cpu_percent(interval=1)
@@ -54,7 +57,7 @@ def get_hour():
     return datetime.now().hour
 
 def collect_data():
-    os.makedirs("ml_data", exist_ok=True)
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
     file_exists = os.path.exists(DATA_FILE)
 
     try:
@@ -126,3 +129,4 @@ def collect_data():
 
 if __name__ == "__main__":
     collect_data()
+

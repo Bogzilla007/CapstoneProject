@@ -12,17 +12,18 @@ import tensorflow as tf
 from collections import deque
 from datetime import datetime
 import csv as _csv
+import runtime_paths
 
 # ── Suppress TensorFlow / oneDNN noise ──────────────────────────────────────
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-MODEL_DIR   = os.path.expanduser("~/project-aegis/ml_data/model")
-MODEL_PATH  = os.path.join(MODEL_DIR, "aegis_model.keras")
-SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
-META_PATH   = os.path.join(MODEL_DIR, "metadata.json")
-SCORES_CSV  = os.path.join(os.path.expanduser("~/project-aegis"), "ml_data", "anomaly_scores.csv")
+MODEL_DIR   = runtime_paths.as_str(runtime_paths.MODEL_DIR)
+MODEL_PATH  = runtime_paths.as_str(runtime_paths.MODEL_PATH)
+SCALER_PATH = runtime_paths.as_str(runtime_paths.SCALER_PATH)
+META_PATH   = runtime_paths.as_str(runtime_paths.METADATA_PATH)
+SCORES_CSV  = runtime_paths.as_str(runtime_paths.ANOMALY_SCORES_CSV)
 
 # ── Module state ─────────────────────────────────────────────────────────────
 _model      = None
@@ -188,3 +189,4 @@ def get_status():
         "window_full": len(_window) >= _timesteps,
         "timesteps":   _timesteps,
     }
+

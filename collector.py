@@ -14,13 +14,14 @@ import psutil
 import subprocess
 from datetime import datetime
 
+import config
 import ml_detector
+import runtime_paths
 import trainer
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR  = os.path.expanduser("~/project-aegis")
-CSV_PATH  = os.path.join(BASE_DIR, "ml_data", "system_metrics.csv")
-AUTH_LOG  = "/var/log/auth.log"
+CSV_PATH  = runtime_paths.as_str(runtime_paths.SYSTEM_METRICS_CSV)
+AUTH_LOG  = config.AUTH_LOG_PATH
 
 # ── Config ───────────────────────────────────────────────────────────────────
 COLLECT_INTERVAL = 10   # seconds
@@ -182,3 +183,4 @@ def stop():
     """Signal the collector loop to exit."""
     global _running
     _running = False
+

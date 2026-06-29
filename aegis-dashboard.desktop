@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Project Aegis
+Comment=Native desktop console for Project Aegis
+Exec=python3 __PROJECT_DIR__/dashboard.py
+Path=__PROJECT_DIR__
+Terminal=false
+Categories=System;Security;

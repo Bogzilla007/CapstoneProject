@@ -11,10 +11,11 @@ import os
 import time
 from datetime import datetime
 import config
+import runtime_paths
 
 # ─── Blocklist ─────────────────────────────────────────────────────────────────
 
-BLOCKLIST_PATH = "reports/blocklist.txt"
+BLOCKLIST_PATH = runtime_paths.as_str(runtime_paths.BLOCKLIST_PATH)
 
 def load_blocklist():
     """Returns dict of ip -> {severity, timestamp, expiry} for all blocked IPs."""
@@ -48,7 +49,7 @@ def is_block_expired(ip):
 
 def save_to_blocklist(ip, severity, summary, expiry_seconds=0):
     """Appends or updates a blocked IP in the blocklist."""
-    os.makedirs("reports", exist_ok=True)
+    os.makedirs(os.path.dirname(BLOCKLIST_PATH), exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     expiry_ts = time.time() + expiry_seconds if expiry_seconds > 0 else 0
     with open(BLOCKLIST_PATH, "a") as f:
@@ -269,3 +270,4 @@ def handle_verdict(ip, verdict, forensics):
         print(f"  [*] Verdict is IGNORE — no action taken for {ip}.")
 
     send_discord_alert(ip, verdict, forensics)
+

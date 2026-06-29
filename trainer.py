@@ -22,19 +22,20 @@ import tensorflow as tf
 from datetime import datetime, timedelta
 
 import ml_detector
+import runtime_paths
 
 # ── Suppress TF noise ────────────────────────────────────────────────────────
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR      = os.path.expanduser("~/project-aegis")
-CSV_PATH      = os.path.join(BASE_DIR, "ml_data", "system_metrics.csv")
-MODEL_DIR     = os.path.join(BASE_DIR, "ml_data", "model")
-MODEL_PATH    = os.path.join(MODEL_DIR, "aegis_model.keras")
-SCALER_PATH   = os.path.join(MODEL_DIR, "scaler.pkl")
-META_PATH     = os.path.join(MODEL_DIR, "metadata.json")
-INCIDENTS_CSV = os.path.join(BASE_DIR, "reports", "incidents.csv")
+BASE_DIR      = runtime_paths.as_str(runtime_paths.BASE_DIR)
+CSV_PATH      = runtime_paths.as_str(runtime_paths.SYSTEM_METRICS_CSV)
+MODEL_DIR     = runtime_paths.as_str(runtime_paths.MODEL_DIR)
+MODEL_PATH    = runtime_paths.as_str(runtime_paths.MODEL_PATH)
+SCALER_PATH   = runtime_paths.as_str(runtime_paths.SCALER_PATH)
+META_PATH     = runtime_paths.as_str(runtime_paths.METADATA_PATH)
+INCIDENTS_CSV = runtime_paths.as_str(runtime_paths.INCIDENTS_CSV)
 
 # Temp paths for atomic swap
 # NOTE: MODEL_TMP must still end in .keras — Keras' model.save() validates
@@ -353,3 +354,5 @@ def stop():
     """Signal the trainer loop to exit cleanly."""
     global _running
     _running = False
+
+

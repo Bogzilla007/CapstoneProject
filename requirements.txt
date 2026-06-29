@@ -1,0 +1,9 @@
+groq
+requests
+psutil
+pandas
+PySide6
+numpy
+scikit-learn
+joblib
+tensorflow

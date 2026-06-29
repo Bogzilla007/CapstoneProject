@@ -1,185 +1,139 @@
 #!/usr/bin/env python3
 """
-Project Aegis — SOC Dashboard (Session 17)
-Five-tab Streamlit C2 interface.
-Tabs: Overview | Incidents | ML Status | Timeline | Block Manager
+Project Aegis desktop dashboard.
+
+Native PySide6/Qt application. No Streamlit server and no browser required.
+The daemon still runs separately as a systemd service; this app reads the
+same CSV/model/blocklist files and refreshes every 10 seconds.
 """
 
-import streamlit as st
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+
 import pandas as pd
 import psutil
-import plotly.graph_objects as go
-import time
-import os
-import json
-import subprocess
-from datetime import datetime
+
 import config
+import runtime_paths
 from system_checks import get_full_system_snapshot
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Project Aegis — SOC Dashboard",
-    page_icon="shield",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# ── Global CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .stApp { background-color: #0d1117; color: #c9d1d9; }
-    h1, h2, h3 { color: #58a6ff; }
-    .header-bar {
-        background: linear-gradient(90deg, #161b22, #1f2937);
-        border-bottom: 2px solid #58a6ff;
-        padding: 10px 20px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-    }
-    .badge {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 11px;
-        font-weight: bold;
-        margin-right: 4px;
-    }
-    .stTabs [data-baseweb="tab"] { color: #8b949e; }
-    .stTabs [aria-selected="true"] { color: #58a6ff !important; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-bar">
-    <h1 style="margin:0; color:#58a6ff;">PROJECT AEGIS &mdash; SOC Dashboard</h1>
-    <p style="margin:0; color:#8b949e;">
-        Autonomous EDR &nbsp;&middot;&nbsp; AI Investigator &nbsp;&middot;&nbsp; Multi-Layer Detection
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR       = os.path.expanduser("~/project-aegis")
-METRICS_CSV    = os.path.join(BASE_DIR, "ml_data", "system_metrics.csv")
-SCORES_CSV     = os.path.join(BASE_DIR, "ml_data", "anomaly_scores.csv")
-META_JSON      = os.path.join(BASE_DIR, "ml_data", "model", "metadata.json")
-BLOCKLIST_PATH = os.path.join(BASE_DIR, "reports", "blocklist.txt")
-
-# ── Helper functions ──────────────────────────────────────────────────────────
-def severity_color(sev):
-    return {
-        "CRITICAL": "#ff4444", "HIGH": "#ff8800",
-        "MEDIUM":   "#ffcc00", "LOW":  "#44ff44",
-    }.get(str(sev).upper(), "#8b949e")
-
-def severity_emoji(sev):
-    return {
-        "CRITICAL": "CRIT", "HIGH": "HIGH",
-        "MEDIUM":   "MED",  "LOW":  "LOW",
-    }.get(str(sev).upper(), "???")
-
-def detection_badge_html(label):
-    cfg = {
-        "BRUTE_FORCE":        ("#ff4444", "BRUTE FORCE"),
-        "ML_ANOMALY":         ("#a371f7", "ML ANOMALY"),
-        "SLOW_PROBE":         ("#ff8800", "SLOW PROBE"),
-        "PERSISTENT_PROBE":   ("#ff6600", "PERSISTENT"),
-        "DISTRIBUTED_ATTACK": ("#ff0000", "DISTRIBUTED"),
-        "PRIV_ESC":           ("#ff4444", "PRIV ESC"),
-        "BREACH_SUSPECTED":   ("#ff0000", "BREACH"),
-        "UNUSUAL_LOGIN":      ("#ffcc00", "UNUSUAL LOGIN"),
-        "NEW_PORT_DETECTED":  ("#58a6ff", "NEW PORT"),
-        "LOG_TAMPER":         ("#ff4444", "LOG TAMPER"),
-        "UFW_TAMPER":         ("#ff4444", "UFW TAMPER"),
-    }
-    color, text = cfg.get(str(label).upper(), ("#8b949e", str(label)))
-    return (
-        '<span class="badge" style="background:' + color + '22;color:' + color
-        + ';border:1px solid ' + color + ';">' + text + '</span>'
+try:
+    from PySide6.QtCore import Qt, QTimer, QRectF
+    from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+    from PySide6.QtWidgets import (
+        QApplication,
+        QFrame,
+        QGridLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QMainWindow,
+        QMessageBox,
+        QPushButton,
+        QScrollArea,
+        QSizePolicy,
+        QTabWidget,
+        QTableWidget,
+        QTableWidgetItem,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
     )
+except ImportError as exc:
+    print("Project Aegis desktop dashboard requires PySide6.")
+    print("Install it with: pip install PySide6 --break-system-packages")
+    raise SystemExit(1) from exc
 
-def get_telemetry():
-    uptime  = time.time() - psutil.boot_time()
-    return {
-        "cpu":       psutil.cpu_percent(interval=1),
-        "ram":       psutil.virtual_memory().percent,
-        "ram_used":  round(psutil.virtual_memory().used  / (1024**3), 2),
-        "ram_total": round(psutil.virtual_memory().total / (1024**3), 2),
-        "uptime":    f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m",
-        "hostname":  os.uname().nodename,
-    }
+
+runtime_paths.ensure_runtime_dirs()
+
+ACCENT = "#26f0a5"
+ACCENT_2 = "#3aa7ff"
+WARNING = "#f5b342"
+DANGER = "#ff5570"
+PANEL = "#101820"
+PANEL_2 = "#15212b"
+BG = "#07110d"
+TEXT = "#d7f5e7"
+MUTED = "#7f9b91"
+
+
+def _read_csv(path, n=None):
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        return df.tail(n) if n else df
+    except Exception:
+        return pd.DataFrame()
+
 
 def load_incidents():
-    csv_path = os.path.join(BASE_DIR, 'reports', 'incidents.csv')
-    if not os.path.exists(csv_path):
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(csv_path)
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        return df
-    except Exception:
-        return pd.DataFrame()
+    return _read_csv(runtime_paths.as_str(runtime_paths.INCIDENTS_CSV))
 
-def load_ml_metadata():
-    if not os.path.exists(META_JSON):
+
+def load_metrics(n=90):
+    return _read_csv(runtime_paths.as_str(runtime_paths.SYSTEM_METRICS_CSV), n=n)
+
+
+def load_scores(n=90):
+    return _read_csv(runtime_paths.as_str(runtime_paths.ANOMALY_SCORES_CSV), n=n)
+
+
+def load_metadata():
+    path = runtime_paths.as_str(runtime_paths.METADATA_PATH)
+    if not os.path.exists(path):
         return {}
     try:
-        with open(META_JSON) as f:
-            return json.load(f)
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
     except Exception:
         return {}
 
-def load_system_metrics(n=60):
-    if not os.path.exists(METRICS_CSV):
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(METRICS_CSV)
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        return df.tail(n)
-    except Exception:
-        return pd.DataFrame()
-
-def load_anomaly_scores(n=60):
-    if not os.path.exists(SCORES_CSV):
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(SCORES_CSV)
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        return df.tail(n)
-    except Exception:
-        return pd.DataFrame()
 
 def load_blocklist():
-    if not os.path.exists(BLOCKLIST_PATH):
+    path = runtime_paths.as_str(runtime_paths.BLOCKLIST_PATH)
+    if not os.path.exists(path):
         return []
-    entries = []
+    rows = []
     try:
-        with open(BLOCKLIST_PATH) as f:
-            for line in f:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
                 line = line.strip()
                 if not line:
                     continue
                 parts = line.split(",", 4)
-                ip       = parts[0] if len(parts) > 0 else "?"
-                sev      = parts[1] if len(parts) > 1 else "?"
-                ts       = parts[2] if len(parts) > 2 else "?"
-                if len(parts) == 5:
-                    expiry  = parts[3]
-                    summary = parts[4]
-                else:
-                    expiry  = "DRY_RUN" if sev == "DRY_RUN" else "0"
-                    summary = parts[3] if len(parts) > 3 else ""
-                entries.append({"ip": ip, "severity": sev,
-                                "timestamp": ts, "expiry": expiry, "summary": summary})
+                rows.append({
+                    "ip": parts[0] if len(parts) > 0 else "?",
+                    "severity": parts[1] if len(parts) > 1 else "?",
+                    "timestamp": parts[2] if len(parts) > 2 else "?",
+                    "expiry": parts[3] if len(parts) > 3 else "0",
+                    "summary": parts[4] if len(parts) > 4 else "",
+                })
     except Exception:
-        pass
-    return entries
+        return []
+    return rows
 
-def expiry_display(expiry, severity):
+
+def severity_color(severity):
+    return {
+        "CRITICAL": DANGER,
+        "HIGH": "#ff8a4c",
+        "MEDIUM": WARNING,
+        "LOW": ACCENT,
+        "DRY_RUN": MUTED,
+    }.get(str(severity).upper(), MUTED)
+
+
+def expiry_text(expiry, severity):
     if severity == "DRY_RUN" or expiry in ("DRY_RUN", ""):
         return "DRY RUN"
     try:
@@ -189,452 +143,484 @@ def expiry_display(expiry, severity):
         remaining = exp - time.time()
         if remaining <= 0:
             return "EXPIRED"
-        return f"{int(remaining // 3600)}h {int((remaining % 3600) // 60)}m left"
+        return f"{int(remaining // 3600)}h {int((remaining % 3600) // 60)}m"
     except Exception:
         return str(expiry)
 
-def plotly_dark_layout(height=350):
-    return dict(
-        paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
-        font=dict(color="#c9d1d9"),
-        xaxis=dict(gridcolor="#21262d"),
-        yaxis=dict(gridcolor="#21262d"),
-        height=height,
-        margin=dict(l=40, r=20, t=20, b=40),
-        showlegend=True,
-        legend=dict(bgcolor="#161b22"),
-    )
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Overview",
-    "Incidents",
-    "ML Status",
-    "Timeline",
-    "Block Manager",
-])
+class Card(QFrame):
+    def __init__(self, title, value="--", subtitle="", color=ACCENT):
+        super().__init__()
+        self.setObjectName("Card")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(112)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
-# ════════════════════════════════════════════════════════════════════════════════
-# TAB 1 — OVERVIEW
-# ════════════════════════════════════════════════════════════════════════════════
-with tab1:
-    st.subheader("Live System Telemetry")
-    tel = get_telemetry()
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: st.metric("Hostname",  tel["hostname"])
-    with c2: st.metric("CPU",       f"{tel['cpu']}%")
-    with c3: st.metric("RAM",       f"{tel['ram']}%")
-    with c4: st.metric("RAM Used",  f"{tel['ram_used']} / {tel['ram_total']} GB")
-    with c5: st.metric("Uptime",    tel["uptime"])
+        self.title = QLabel(title)
+        self.title.setObjectName("CardTitle")
+        self.value = QLabel(value)
+        self.value.setObjectName("CardValue")
+        self.value.setStyleSheet(f"color: {color};")
+        self.subtitle = QLabel(subtitle)
+        self.subtitle.setObjectName("Muted")
+        self.subtitle.setWordWrap(True)
 
-    st.subheader("Resource Utilization (live)")
-    if "cpu_history" not in st.session_state:
-        st.session_state.cpu_history  = []
-        st.session_state.ram_history  = []
-        st.session_state.time_history = []
-    st.session_state.cpu_history.append(tel["cpu"])
-    st.session_state.ram_history.append(tel["ram"])
-    st.session_state.time_history.append(datetime.now().strftime("%H:%M:%S"))
-    st.session_state.cpu_history  = st.session_state.cpu_history[-30:]
-    st.session_state.ram_history  = st.session_state.ram_history[-30:]
-    st.session_state.time_history = st.session_state.time_history[-30:]
-    chart_df = pd.DataFrame(
-        {"CPU %": st.session_state.cpu_history, "RAM %": st.session_state.ram_history},
-        index=st.session_state.time_history,
-    )
-    st.line_chart(chart_df, color=["#58a6ff", "#ff6b6b"])
+        layout.addWidget(self.title)
+        layout.addWidget(self.value)
+        layout.addWidget(self.subtitle)
 
-    st.subheader("Live System Security Checks")
-    snapshot = get_full_system_snapshot()
+    def set_data(self, value, subtitle=""):
+        self.value.setText(str(value))
+        self.subtitle.setText(str(subtitle))
 
-    with st.expander("Open Ports", expanded=True):
-        ports = [
-            {"Port": p.get("port","?"), "Address": p.get("address","?"),
-             "Process": p.get("process","unknown"), "State": p.get("state","?")}
-            for p in snapshot["open_ports"] if "error" not in p
-        ]
-        if ports:
-            st.dataframe(pd.DataFrame(ports), hide_index=True)
-        else:
-            st.info("No open ports.")
 
-    with st.expander("Active Users", expanded=True):
-        users = [
-            {"User": u.get("user","?"), "Terminal": u.get("terminal","?"),
-             "Date": u.get("date","?"), "Time": u.get("time","?"), "Source": u.get("source","local")}
-            for u in snapshot["active_users"] if "error" not in u
-        ]
-        if users:
-            st.dataframe(pd.DataFrame(users), hide_index=True)
-        else:
-            st.info("No active users.")
+class Sparkline(QFrame):
+    def __init__(self, color=ACCENT, fill=False):
+        super().__init__()
+        self.values = []
+        self.color = QColor(color)
+        self.fill = fill
+        self.setMinimumHeight(140)
+        self.setObjectName("Chart")
 
-    with st.expander("Running Services", expanded=True):
-        svcs = [
-            {"Service": s.get("name","?"), "Status": s.get("sub","?"), "Description": s.get("description","")}
-            for s in snapshot["running_services"] if "error" not in s
-        ]
-        if svcs:
-            st.dataframe(pd.DataFrame(svcs), hide_index=True)
-        else:
-            st.info("No services found.")
+    def set_values(self, values):
+        self.values = [float(v) for v in values if pd.notna(v)]
+        self.update()
 
-    st.markdown("---")
-    st.subheader("Export Reports")
-    ca, cb = st.columns(2)
-    with ca:
-        if os.path.exists(config.CSV_REPORT_PATH):
-            with open(config.CSV_REPORT_PATH, "rb") as fh:
-                st.download_button("Download CSV Report", fh, "aegis_incidents.csv", "text/csv")
-        else:
-            st.button("Download CSV Report", disabled=True)
-    with cb:
-        if os.path.exists(config.TEXT_REPORT_PATH):
-            with open(config.TEXT_REPORT_PATH, "rb") as fh:
-                st.download_button("Download Text Report", fh, "aegis_incidents.txt", "text/plain")
-        else:
-            st.button("Download Text Report", disabled=True)
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(14, 14, -14, -14)
 
-# ════════════════════════════════════════════════════════════════════════════════
-# TAB 2 — INCIDENTS
-# ════════════════════════════════════════════════════════════════════════════════
-with tab2:
-    df = load_incidents()
+        painter.setPen(QPen(QColor("#1f3a32"), 1))
+        for i in range(1, 4):
+            y = rect.top() + rect.height() * i / 4
+            painter.drawLine(rect.left(), int(y), rect.right(), int(y))
 
-    if df.empty:
-        st.info("No incidents detected yet. Daemon is watching...")
-    else:
-        total      = len(df)
-        critical   = int((df["severity"] == "CRITICAL").sum()) if "severity"    in df.columns else 0
-        blocked    = int((df["action"]   == "BLOCK").sum())    if "action"      in df.columns else 0
-        unique_ips = df["attacker_ip"].nunique()                if "attacker_ip" in df.columns else 0
+        if len(self.values) < 2:
+            painter.setPen(QColor(MUTED))
+            painter.drawText(rect, Qt.AlignCenter, "Waiting for data")
+            return
 
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: st.metric("Total Incidents", total)
-        with c2: st.metric("Critical",        critical)
-        with c3: st.metric("IPs Blocked",     blocked)
-        with c4: st.metric("Unique Attackers", unique_ips)
-
-        st.markdown("---")
-        st.subheader("Incident Feed")
-        display_df = df.sort_values("timestamp", ascending=False) if "timestamp" in df.columns else df
-
-        for _, row in display_df.iterrows():
-            sev    = str(row.get("severity", "UNKNOWN")).upper()
-            color  = severity_color(sev)
-            action = str(row.get("action", "N/A"))
-            ip     = str(row.get("attacker_ip", "N/A"))
-            ts_raw = row.get("timestamp", "N/A")
-            ts     = ts_raw.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts_raw, "strftime") else str(ts_raw)
-            country  = str(row.get("country",         "Unknown"))
-            isp      = str(row.get("isp",             "Unknown"))
-            attempts = str(row.get("failed_attempts", "?"))
-            summary  = str(row.get("summary",         "No summary."))
-            det_lbl  = str(row.get("detection_label", "BRUTE_FORCE"))
-
-            # Build badge row
-            badges = detection_badge_html(det_lbl)
-
-            abuse_raw = row.get("abuse_score", None)
-            if abuse_raw is not None and str(abuse_raw) not in ("", "nan", "0"):
-                try:
-                    a  = int(float(abuse_raw))
-                    ac = "#ff4444" if a >= 80 else "#ff8800" if a >= 50 else "#ffcc00"
-                    badges += (
-                        '<span class="badge" style="background:' + ac + '22;color:' + ac
-                        + ';border:1px solid ' + ac + ';">ABUSE ' + str(a) + '%</span>'
-                    )
-                except Exception:
-                    pass
-
-            if str(row.get("repeat_offender", "")).lower() in ("true", "1"):
-                badges += '<span class="badge" style="background:#ff444422;color:#ff4444;border:1px solid #ff4444;">REPEAT</span>'
-
-            timing = str(row.get("timing_pattern", ""))
-            if timing not in ("", "nan", "INSUFFICIENT_DATA", "None"):
-                tc = "#ff4444" if "AUTOMATED" in timing else "#58a6ff"
-                badges += (
-                    '<span class="badge" style="background:' + tc + '22;color:' + tc
-                    + ';border:1px solid ' + tc + ';">' + timing + '</span>'
-                )
-
-            # Extra detail lines
-            extra = ""
-            usernames = str(row.get("usernames", ""))
-            if usernames not in ("", "nan", "None"):
-                names = usernames.replace("|", ", ")
-                extra += ("<div style='margin-top:4px;color:#8b949e;font-size:12px;'>"
-                          "Targeted users: <span style='color:#c9d1d9;'>" + names + "</span></div>")
-
-            anom = str(row.get("anomaly_score", ""))
-            if anom not in ("", "nan", "None"):
-                try:
-                    extra += ("<div style='margin-top:4px;color:#8b949e;font-size:12px;'>"
-                              "Anomaly score: <span style='color:#a371f7;'>"
-                              + f"{float(anom):.6f}" + "</span></div>")
-                except Exception:
-                    pass
-
-            with st.expander(f"[{sev}]  {ip}  —  {ts}", expanded=False):
-                st.markdown(
-                    "<div style='padding:6px;'>"
-                    "<div style='margin-bottom:8px;'>" + badges + "</div>"
-                    "<div style='color:#c9d1d9;margin-bottom:4px;'>"
-                    "IP: <b>" + ip + "</b> &nbsp;|&nbsp; "
-                    "Country: " + country + " &nbsp;|&nbsp; "
-                    "ISP: " + isp + " &nbsp;|&nbsp; "
-                    "Attempts: " + attempts + " &nbsp;|&nbsp; "
-                    "Action: <span style='color:" + color + ";'>" + action + "</span>"
-                    "</div>"
-                    + extra +
-                    "<div style='margin-top:8px;color:#8b949e;font-size:13px;"
-                    "border-top:1px solid #21262d;padding-top:6px;'>"
-                    + summary + "</div></div>",
-                    unsafe_allow_html=True,
-                )
-
-# ════════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ML STATUS
-# ════════════════════════════════════════════════════════════════════════════════
-with tab3:
-    meta       = load_ml_metadata()
-    scores_df  = load_anomaly_scores(60)
-    metrics_df = load_system_metrics(60)
-
-    st.subheader("Model Status")
-
-    if not meta:
-        st.warning("No model metadata found. Train the model first.")
-    else:
-        threshold     = meta.get("threshold", "N/A")
-        trained_at    = meta.get("trained_at", "N/A")
-        seq_len       = meta.get("sequence_length", meta.get("timesteps", "N/A"))
-        epochs        = meta.get("epochs_trained", "N/A")
-        val_loss      = meta.get("final_val_loss", "N/A")
-        retrain_count = meta.get("retrain_count", 0)
-        clean_rows    = meta.get("clean_rows", "N/A")
-
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            thr_display = f"{float(threshold):.6f}" if isinstance(threshold, (int, float)) else str(threshold)
-            st.metric("Anomaly Threshold", thr_display)
-        with m2:
-            st.metric("Last Trained", str(trained_at)[:16] if trained_at != "N/A" else "N/A")
-        with m3:
-            st.metric("Retrain Cycles", retrain_count)
-        with m4:
-            st.metric("Clean Training Rows", clean_rows)
-
-        m5, m6, m7 = st.columns(3)
-        with m5: st.metric("Sequence Length", seq_len)
-        with m6: st.metric("Epochs Trained",  epochs)
-        with m7:
-            vl_display = f"{float(val_loss):.6f}" if isinstance(val_loss, (int, float)) else str(val_loss)
-            st.metric("Final Val Loss", vl_display)
-
-        feats = meta.get("features", [])
-        if feats:
-            st.markdown("**Features:** " + "  ·  ".join(f"`{f}`" for f in feats))
-
-    st.markdown("---")
-    st.subheader("Live Anomaly Score Graph")
-
-    if not scores_df.empty and "score" in scores_df.columns:
-        threshold_val = float(meta.get("threshold", 0.072743)) if meta else 0.072743
-        anomaly_mask  = scores_df.get("is_anomaly", pd.Series([False] * len(scores_df)))
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=scores_df["timestamp"],
-            y=scores_df["score"],
-            mode="lines+markers",
-            name="Anomaly Score",
-            line=dict(color="#a371f7", width=2),
-            marker=dict(
-                size=5,
-                color=["#ff4444" if v else "#a371f7" for v in anomaly_mask],
-            ),
-        ))
-        fig.add_hline(
-            y=threshold_val,
-            line_dash="dash",
-            line_color="#ff4444",
-            annotation_text=f"Threshold {threshold_val:.4f}",
-            annotation_position="top right",
-        )
-        layout = plotly_dark_layout(350)
-        layout["xaxis"]["title"] = "Time"
-        layout["yaxis"]["title"] = "MAE Score"
-        fig.update_layout(**layout)
-        st.plotly_chart(fig, use_container_width=True)
-
-        n_anomalies = int(anomaly_mask.sum()) if hasattr(anomaly_mask, "sum") else 0
-        if n_anomalies > 0:
-            st.warning(f"{n_anomalies} anomalous readings in last 60 samples")
-        else:
-            st.success("All recent readings within normal range")
-    else:
-        st.info("Anomaly score history not yet available. Start the daemon to begin collecting scores.")
-
-    if not metrics_df.empty and "cpu_percent" in metrics_df.columns:
-        st.markdown("---")
-        st.subheader("System Telemetry History (last 60 samples)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(
-            x=metrics_df["timestamp"], y=metrics_df["cpu_percent"],
-            mode="lines", name="CPU %", line=dict(color="#58a6ff"),
-        ))
-        fig2.add_trace(go.Scatter(
-            x=metrics_df["timestamp"], y=metrics_df["ram_percent"],
-            mode="lines", name="RAM %", line=dict(color="#ff6b6b"),
-        ))
-        layout2 = plotly_dark_layout(280)
-        layout2["yaxis"]["range"] = [0, 100]
-        fig2.update_layout(**layout2)
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ════════════════════════════════════════════════════════════════════════════════
-# TAB 4 — TIMELINE
-# ════════════════════════════════════════════════════════════════════════════════
-with tab4:
-    df = load_incidents()
-
-    if df.empty or "timestamp" not in df.columns:
-        st.info("No incident data yet for timeline analysis.")
-    else:
-        df_ts = df.dropna(subset=["timestamp"]).copy()
-        df_ts["hour"] = df_ts["timestamp"].dt.hour
-        df_ts["date"] = df_ts["timestamp"].dt.strftime("%Y-%m-%d")
-
-        st.subheader("Attack Heatmap — Hour of Day vs Date")
-        heat  = df_ts.groupby(["date", "hour"]).size().reset_index(name="count")
-        if not heat.empty:
-            pivot = heat.pivot(index="date", columns="hour", values="count").fillna(0)
-            for h in range(24):
-                if h not in pivot.columns:
-                    pivot[h] = 0
-            pivot = pivot[sorted(pivot.columns)]
-
-            fig_heat = go.Figure(data=go.Heatmap(
-                z=pivot.values,
-                x=[f"{h:02d}:00" for h in pivot.columns],
-                y=pivot.index.tolist(),
-                colorscale=[[0, "#161b22"], [0.5, "#ff8800"], [1.0, "#ff4444"]],
-                showscale=True,
-                hoverongaps=False,
-            ))
-            layout_h = plotly_dark_layout(max(200, 60 * len(pivot) + 80))
-            layout_h["xaxis"]["title"] = "Hour of Day"
-            layout_h["yaxis"]["title"] = "Date"
-            fig_heat.update_layout(**layout_h)
-            st.plotly_chart(fig_heat, use_container_width=True)
-
-        st.markdown("---")
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.subheader("Top 5 Attacking IPs")
-            if "attacker_ip" in df_ts.columns:
-                top_ips = df_ts["attacker_ip"].value_counts().head(5).reset_index()
-                top_ips.columns = ["IP Address", "Incidents"]
-                st.dataframe(top_ips, hide_index=True, use_container_width=True)
+        mn, mx = min(self.values), max(self.values)
+        if mx == mn:
+            mx = mn + 1
+        step = rect.width() / (len(self.values) - 1)
+        path = QPainterPath()
+        fill_path = QPainterPath()
+        points = []
+        for idx, value in enumerate(self.values):
+            x = rect.left() + idx * step
+            y = rect.bottom() - ((value - mn) / (mx - mn)) * rect.height()
+            points.append((x, y))
+            if idx == 0:
+                path.moveTo(x, y)
+                fill_path.moveTo(x, rect.bottom())
+                fill_path.lineTo(x, y)
             else:
-                st.info("No IP data available.")
+                path.lineTo(x, y)
+                fill_path.lineTo(x, y)
 
-        with col_b:
-            st.subheader("Top 5 Targeted Usernames")
-            if "usernames" in df_ts.columns:
-                all_users = []
-                for val in df_ts["usernames"].dropna():
-                    if str(val) not in ("", "nan"):
-                        all_users.extend(str(val).split("|"))
-                if all_users:
-                    top_u = pd.Series(all_users).value_counts().head(5).reset_index()
-                    top_u.columns = ["Username", "Times Targeted"]
-                    st.dataframe(top_u, hide_index=True, use_container_width=True)
-                else:
-                    st.info("No username data yet (requires Session 13+ log parser).")
-            else:
-                st.info("No username column found. Run daemon to generate new incidents.")
+        if self.fill:
+            fill_path.lineTo(points[-1][0], rect.bottom())
+            fill_path.closeSubpath()
+            fill = QColor(self.color)
+            fill.setAlpha(45)
+            painter.fillPath(fill_path, fill)
 
-        st.markdown("---")
-        st.subheader("Severity Distribution")
-        if "severity" in df.columns:
-            sev_c = df["severity"].value_counts().reset_index()
-            sev_c.columns = ["Severity", "Count"]
-            clr_map = {"CRITICAL": "#ff4444", "HIGH": "#ff8800", "MEDIUM": "#ffcc00", "LOW": "#44ff44"}
-            fig_bar = go.Figure(data=[go.Bar(
-                x=sev_c["Severity"],
-                y=sev_c["Count"],
-                marker_color=[clr_map.get(s, "#8b949e") for s in sev_c["Severity"]],
-            )])
-            layout_b = plotly_dark_layout(250)
-            layout_b["showlegend"] = False
-            fig_bar.update_layout(**layout_b)
-            st.plotly_chart(fig_bar, use_container_width=True)
+        pen = QPen(self.color, 2)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
-# ════════════════════════════════════════════════════════════════════════════════
-# TAB 5 — BLOCK MANAGER
-# ════════════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.subheader("Active Block Manager")
-    blocklist = load_blocklist()
 
-    if config.DRY_RUN:
-        st.warning(
-            "DRY_RUN = True in config.py — IPs are logged but not actually blocked. "
-            "Set DRY_RUN = False to enable real enforcement."
-        )
+class DataTable(QTableWidget):
+    def __init__(self, columns):
+        super().__init__(0, len(columns))
+        self.columns = columns
+        self.setHorizontalHeaderLabels(columns)
+        self.verticalHeader().setVisible(False)
+        self.setAlternatingRowColors(True)
+        self.setSelectionBehavior(QTableWidget.SelectRows)
+        self.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-    if not blocklist:
-        st.info("No blocked IPs on record.")
-    else:
-        for entry in reversed(blocklist):
-            ip      = entry["ip"]
-            sev     = entry["severity"]
-            ts      = entry["timestamp"]
-            expiry  = entry["expiry"]
-            summary = entry["summary"]
-            color   = severity_color(sev) if sev != "DRY_RUN" else "#8b949e"
-            exp_txt = expiry_display(expiry, sev)
+    def set_rows(self, rows):
+        self.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            for col_idx, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setForeground(QColor(TEXT))
+                self.setItem(row_idx, col_idx, item)
 
-            with st.expander(f"BLOCKED  {ip}    {sev}    {exp_txt}", expanded=False):
-                st.markdown(
-                    "<div style='color:#c9d1d9;padding:4px;'>"
-                    "<b>Blocked at:</b> " + ts + "<br>"
-                    "<b>Status:</b> <span style='color:" + color + ";'>" + exp_txt + "</span><br>"
-                    "<b>Reason:</b> " + summary + "</div>",
-                    unsafe_allow_html=True,
-                )
-                if config.DRY_RUN:
-                    st.button(f"Unblock {ip} (disabled — DRY_RUN)", key=f"unblock_{ip}", disabled=True)
-                else:
-                    if st.button(f"Unblock {ip}", key=f"unblock_{ip}"):
-                        try:
-                            r = subprocess.run(
-                                ["sudo", "ufw", "delete", "deny", "from", ip],
-                                capture_output=True, text=True,
-                            )
-                            if r.returncode == 0:
-                                st.success(f"{ip} unblocked successfully.")
-                            else:
-                                st.error(f"Failed: {r.stderr.strip()}")
-                        except Exception as e:
-                            st.error(f"Error: {e}")
 
-    st.markdown("---")
-    st.subheader("IP Whitelist")
-    whitelist = getattr(config, "IP_WHITELIST", [])
-    if whitelist:
-        for wip in whitelist:
-            st.markdown(f"- `{wip}`")
-    else:
-        st.info("No IPs whitelisted.")
+class Dashboard(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Project Aegis")
+        self.resize(1380, 860)
 
-# ── Footer + auto-refresh ─────────────────────────────────────────────────────
-st.markdown("---")
-st.caption(
-    f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  |  Auto-refreshes every 10 seconds"
-)
-time.sleep(10)
-st.rerun()
+        root = QWidget()
+        self.setCentralWidget(root)
+        main = QVBoxLayout(root)
+        main.setContentsMargins(18, 16, 18, 16)
+        main.setSpacing(14)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("Project Aegis")
+        title.setObjectName("AppTitle")
+        subtitle = QLabel("Autonomous security monitor | Native desktop console")
+        subtitle.setObjectName("Muted")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addLayout(title_box)
+        header.addStretch()
+        self.status = QLabel("Starting")
+        self.status.setObjectName("StatusPill")
+        header.addWidget(self.status)
+        main.addLayout(header)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        main.addWidget(self.tabs)
+
+        self._build_overview()
+        self._build_incidents()
+        self._build_ml()
+        self._build_timeline()
+        self._build_blocks()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(10_000)
+        self.refresh()
+
+    def _build_overview(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(14)
+
+        grid = QGridLayout()
+        self.host_card = Card("Host", "--", "System hostname", ACCENT_2)
+        self.cpu_card = Card("CPU", "--", "Live utilization", ACCENT)
+        self.ram_card = Card("RAM", "--", "Memory pressure", WARNING)
+        self.incident_card = Card("Incidents", "--", "Total recorded", DANGER)
+        self.block_card = Card("Blocks", "--", "Active blocklist rows", ACCENT)
+        for idx, card in enumerate([self.host_card, self.cpu_card, self.ram_card, self.incident_card, self.block_card]):
+            grid.addWidget(card, 0, idx)
+        layout.addLayout(grid)
+
+        chart_row = QHBoxLayout()
+        self.cpu_chart = Sparkline(ACCENT_2, fill=True)
+        self.ram_chart = Sparkline(WARNING, fill=True)
+        chart_row.addWidget(self._panel("CPU History", self.cpu_chart), 1)
+        chart_row.addWidget(self._panel("RAM History", self.ram_chart), 1)
+        layout.addLayout(chart_row)
+
+        checks = QHBoxLayout()
+        self.ports_table = DataTable(["Port", "Address", "Process", "State"])
+        self.users_table = DataTable(["User", "Terminal", "Source"])
+        checks.addWidget(self._panel("Open Ports", self.ports_table), 2)
+        checks.addWidget(self._panel("Active Users", self.users_table), 1)
+        layout.addLayout(checks)
+        self.tabs.addTab(page, "Overview")
+
+    def _build_incidents(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.incident_table = DataTable(["Time", "Severity", "Action", "IP", "Detection", "Summary"])
+        layout.addWidget(self.incident_table)
+        self.tabs.addTab(page, "Incidents")
+
+    def _build_ml(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        cards = QGridLayout()
+        self.phase_card = Card("ML Phase", "--", "Detector status", ACCENT)
+        self.threshold_card = Card("Threshold", "--", "Current anomaly limit", ACCENT_2)
+        self.trained_card = Card("Last Trained", "--", "Model metadata", WARNING)
+        self.clean_rows_card = Card("Clean Rows", "--", "Training rows", ACCENT)
+        for idx, card in enumerate([self.phase_card, self.threshold_card, self.trained_card, self.clean_rows_card]):
+            cards.addWidget(card, 0, idx)
+        layout.addLayout(cards)
+        self.score_chart = Sparkline("#b785ff", fill=True)
+        layout.addWidget(self._panel("Anomaly Score", self.score_chart))
+        self.meta_text = QTextEdit()
+        self.meta_text.setReadOnly(True)
+        self.meta_text.setMinimumHeight(150)
+        layout.addWidget(self._panel("Model Metadata", self.meta_text))
+        self.tabs.addTab(page, "ML Status")
+
+    def _build_timeline(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        top = QHBoxLayout()
+        self.top_ips_table = DataTable(["IP", "Incidents"])
+        self.top_users_table = DataTable(["Username", "Attempts"])
+        top.addWidget(self._panel("Top Attacking IPs", self.top_ips_table), 1)
+        top.addWidget(self._panel("Top Targeted Users", self.top_users_table), 1)
+        layout.addLayout(top)
+        self.severity_table = DataTable(["Severity", "Count"])
+        layout.addWidget(self._panel("Severity Distribution", self.severity_table))
+        self.tabs.addTab(page, "Timeline")
+
+    def _build_blocks(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.dry_run_label = QLabel("")
+        self.dry_run_label.setObjectName("WarningText")
+        layout.addWidget(self.dry_run_label)
+        self.block_table = DataTable(["IP", "Severity", "Blocked At", "Expiry", "Reason"])
+        layout.addWidget(self.block_table)
+        self.whitelist_text = QTextEdit()
+        self.whitelist_text.setReadOnly(True)
+        self.whitelist_text.setMaximumHeight(120)
+        layout.addWidget(self._panel("IP Whitelist", self.whitelist_text))
+        self.tabs.addTab(page, "Block Manager")
+
+    def _panel(self, title, widget):
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 14)
+        label = QLabel(title)
+        label.setObjectName("PanelTitle")
+        layout.addWidget(label)
+        layout.addWidget(widget)
+        return frame
+
+    def refresh(self):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.status.setText(f"Live | {now}")
+        incidents = load_incidents()
+        metrics = load_metrics()
+        scores = load_scores()
+        blocks = load_blocklist()
+        meta = load_metadata()
+
+        self._refresh_overview(incidents, metrics, blocks)
+        self._refresh_incidents(incidents)
+        self._refresh_ml(scores, meta)
+        self._refresh_timeline(incidents)
+        self._refresh_blocks(blocks)
+
+    def _refresh_overview(self, incidents, metrics, blocks):
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        uptime = time.time() - psutil.boot_time()
+        self.host_card.set_data(os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", "localhost"), f"Uptime {int(uptime // 3600)}h {int((uptime % 3600) // 60)}m")
+        self.cpu_card.set_data(f"{cpu:.1f}%", "Live sample")
+        self.ram_card.set_data(f"{mem.percent:.1f}%", f"{mem.used / (1024 ** 3):.1f}/{mem.total / (1024 ** 3):.1f} GB")
+        self.incident_card.set_data(len(incidents), "CSV incident rows")
+        self.block_card.set_data(len(blocks), "Blocklist rows")
+
+        if not metrics.empty:
+            if "cpu_percent" in metrics:
+                self.cpu_chart.set_values(metrics["cpu_percent"].tolist())
+            if "ram_percent" in metrics:
+                self.ram_chart.set_values(metrics["ram_percent"].tolist())
+
+        try:
+            snapshot = get_full_system_snapshot()
+            ports = []
+            for item in snapshot.get("open_ports", [])[:20]:
+                if "error" in item:
+                    continue
+                ports.append([
+                    item.get("port", "?"),
+                    item.get("address", "?"),
+                    item.get("process", "unknown"),
+                    item.get("state", "?"),
+                ])
+            self.ports_table.set_rows(ports)
+
+            users = []
+            for item in snapshot.get("active_users", [])[:20]:
+                if "error" in item:
+                    continue
+                users.append([item.get("user", "?"), item.get("terminal", "?"), item.get("source", "local")])
+            self.users_table.set_rows(users)
+        except Exception:
+            self.ports_table.set_rows([])
+            self.users_table.set_rows([])
+
+    def _refresh_incidents(self, incidents):
+        if incidents.empty:
+            self.incident_table.set_rows([])
+            return
+        rows = []
+        data = incidents.sort_values("timestamp", ascending=False) if "timestamp" in incidents else incidents
+        for _, row in data.head(100).iterrows():
+            ts = row.get("timestamp", "")
+            if hasattr(ts, "strftime"):
+                ts = ts.strftime("%Y-%m-%d %H:%M:%S")
+            rows.append([
+                ts,
+                row.get("severity", "UNKNOWN"),
+                row.get("action", "N/A"),
+                row.get("attacker_ip", "N/A"),
+                row.get("detection_label", "UNKNOWN"),
+                str(row.get("summary", ""))[:140],
+            ])
+        self.incident_table.set_rows(rows)
+
+    def _refresh_ml(self, scores, meta):
+        threshold = meta.get("threshold", "N/A")
+        threshold_text = f"{float(threshold):.6f}" if isinstance(threshold, (int, float)) else str(threshold)
+        self.threshold_card.set_data(threshold_text, "95th percentile target")
+        self.trained_card.set_data(str(meta.get("trained_at", "N/A"))[:19], "Last model save")
+        self.clean_rows_card.set_data(meta.get("clean_rows", "N/A"), "Clean samples")
+        phase = "DEFENDING" if os.path.exists(runtime_paths.as_str(runtime_paths.MODEL_PATH)) else "WARMING UP"
+        self.phase_card.set_data(phase, "Desktop view estimate")
+        if not scores.empty and "score" in scores:
+            self.score_chart.set_values(scores["score"].tolist())
+        self.meta_text.setPlainText(json.dumps(meta or {"status": "No metadata found"}, indent=2))
+
+    def _refresh_timeline(self, incidents):
+        if incidents.empty:
+            self.top_ips_table.set_rows([])
+            self.top_users_table.set_rows([])
+            self.severity_table.set_rows([])
+            return
+        if "attacker_ip" in incidents:
+            top_ips = incidents["attacker_ip"].value_counts().head(8)
+            self.top_ips_table.set_rows([[ip, count] for ip, count in top_ips.items()])
+        if "usernames" in incidents:
+            names = []
+            for value in incidents["usernames"].dropna():
+                if str(value) not in ("", "nan", "None"):
+                    names.extend(str(value).split("|"))
+            top_users = pd.Series(names).value_counts().head(8) if names else pd.Series(dtype=int)
+            self.top_users_table.set_rows([[name, count] for name, count in top_users.items()])
+        if "severity" in incidents:
+            severity = incidents["severity"].value_counts()
+            self.severity_table.set_rows([[name, count] for name, count in severity.items()])
+
+    def _refresh_blocks(self, blocks):
+        if getattr(config, "DRY_RUN", True):
+            self.dry_run_label.setText("DRY_RUN is enabled. Aegis will log block actions without changing UFW rules.")
+        else:
+            self.dry_run_label.setText("LIVE BLOCKING ENABLED. Confirm your admin IP is whitelisted.")
+
+        rows = []
+        for block in reversed(blocks[-100:]):
+            rows.append([
+                block["ip"],
+                block["severity"],
+                block["timestamp"],
+                expiry_text(block["expiry"], block["severity"]),
+                block["summary"],
+            ])
+        self.block_table.set_rows(rows)
+        whitelist = getattr(config, "IP_WHITELIST", [])
+        self.whitelist_text.setPlainText("\n".join(str(ip) for ip in whitelist) or "No whitelist entries configured.")
+
+
+STYLE = f"""
+QMainWindow, QWidget {{
+    background: {BG};
+    color: {TEXT};
+    font-family: "Inter", "Segoe UI", "Noto Sans", sans-serif;
+    font-size: 13px;
+}}
+QTabWidget::pane {{
+    border: 1px solid #1d3a32;
+    border-radius: 8px;
+    background: #0a1511;
+}}
+QTabBar::tab {{
+    background: #0d1714;
+    color: {MUTED};
+    padding: 10px 18px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 4px;
+}}
+QTabBar::tab:selected {{
+    color: {ACCENT};
+    background: {PANEL};
+    border: 1px solid #1d5c48;
+}}
+QFrame#Card, QFrame#Panel, QFrame#Chart {{
+    background: {PANEL};
+    border: 1px solid #1a3b31;
+    border-radius: 8px;
+}}
+QFrame#Card:hover, QFrame#Panel:hover {{
+    border: 1px solid #2ee6a0;
+}}
+QLabel#AppTitle {{
+    color: {TEXT};
+    font-size: 28px;
+    font-weight: 700;
+}}
+QLabel#CardTitle, QLabel#PanelTitle {{
+    color: {MUTED};
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+}}
+QLabel#CardValue {{
+    font-size: 30px;
+    font-weight: 800;
+}}
+QLabel#Muted {{
+    color: {MUTED};
+}}
+QLabel#StatusPill {{
+    color: {ACCENT};
+    background: #0e241d;
+    border: 1px solid #1c6e52;
+    border-radius: 12px;
+    padding: 6px 12px;
+}}
+QLabel#WarningText {{
+    color: {WARNING};
+    padding: 8px;
+}}
+QTableWidget {{
+    background: {PANEL_2};
+    alternate-background-color: #101c24;
+    color: {TEXT};
+    border: 1px solid #1a3b31;
+    border-radius: 6px;
+    gridline-color: #20382f;
+}}
+QHeaderView::section {{
+    background: #0e241d;
+    color: {ACCENT};
+    padding: 8px;
+    border: 0;
+    font-weight: 700;
+}}
+QTextEdit {{
+    background: {PANEL_2};
+    color: {TEXT};
+    border: 1px solid #1a3b31;
+    border-radius: 6px;
+    padding: 8px;
+}}
+QScrollBar:vertical {{
+    background: #08110e;
+    width: 10px;
+}}
+QScrollBar::handle:vertical {{
+    background: #1d5c48;
+    border-radius: 5px;
+}}
+"""
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(STYLE)
+    window = Dashboard()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

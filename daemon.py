@@ -30,6 +30,7 @@ import threat_tracker
 import ml_detector
 import trainer
 import resilience
+import runtime_paths
 
 # Shared state
 incident_lock = threading.Lock()
@@ -221,6 +222,9 @@ def run_pipeline(ip, label, failed_count=0, raw_log_lines=None, extra_context=No
 
 def rule_engine_thread():
     print("[RULE ENGINE] Starting - tailing auth.log")
+    while not os.path.exists(config.AUTH_LOG_PATH):
+        print(f"[RULE ENGINE] Waiting for {config.AUTH_LOG_PATH} to exist...", flush=True)
+        time.sleep(10)
     failed_attempts = defaultdict(list)
     triggered_ips = set()
     ip_log_lines = defaultdict(list)
@@ -430,7 +434,9 @@ def print_banner():
     print("=" * 70)
 
 def main():
+    runtime_paths.ensure_runtime_dirs()
     print_banner()
+    ml_detector.load_model()
     threat_tracker.initialize_port_baseline()
     collector.start()
     print("[MAIN] Thread 2 (Collector) started")
@@ -458,3 +464,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

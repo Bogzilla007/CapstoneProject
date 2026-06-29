@@ -17,11 +17,12 @@ from tensorflow.keras.layers import Input, LSTM, Dense, RepeatVector, TimeDistri
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.preprocessing import MinMaxScaler
 import joblib
+import runtime_paths
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
-DATA_FILE = "ml_data/normal_behavior.csv"
-MODEL_DIR = "ml_data/model"
+DATA_FILE = runtime_paths.as_str(runtime_paths.NORMAL_BEHAVIOR_CSV)
+MODEL_DIR = runtime_paths.as_str(runtime_paths.MODEL_DIR)
 SEQUENCE_LENGTH = 20      # 20 timesteps = 200 seconds of history
 FEATURES = [
     "cpu_percent", "ram_percent", "failed_logins",
@@ -233,3 +234,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
