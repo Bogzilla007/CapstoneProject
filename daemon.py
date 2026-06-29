@@ -149,20 +149,28 @@ def save_reports(forensics, verdict=None):
     csv_exists = os.path.exists(config.CSV_REPORT_PATH)
     with open(config.CSV_REPORT_PATH, "a", newline="") as f:
         fieldnames = ["timestamp", "attacker_ip", "failed_attempts",
-                      "country", "isp", "org", "severity", "action", "summary"]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                      "country", "isp", "org", "severity", "action", "summary",
+                      "detection_label", "abuse_score", "timing_pattern",
+                      "usernames", "repeat_offender", "anomaly_score"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if not csv_exists:
             writer.writeheader()
         writer.writerow({
-            "timestamp": forensics["timestamp"],
-            "attacker_ip": forensics["attacker_ip"],
+            "timestamp":       forensics["timestamp"],
+            "attacker_ip":     forensics["attacker_ip"],
             "failed_attempts": forensics["failed_attempts"],
-            "country": forensics["geo"].get("country", "Unknown"),
-            "isp": forensics["geo"].get("isp", "Unknown"),
-            "org": forensics["geo"].get("org", "Unknown"),
-            "severity": verdict.get("severity", "N/A") if verdict else "PENDING",
-            "action": verdict.get("action", "N/A") if verdict else "PENDING",
-            "summary": verdict.get("summary", "") if verdict else ""
+            "country":         forensics["geo"].get("country", "Unknown"),
+            "isp":             forensics["geo"].get("isp", "Unknown"),
+            "org":             forensics["geo"].get("org", "Unknown"),
+            "severity":        verdict.get("severity", "N/A") if verdict else "PENDING",
+            "action":          verdict.get("action", "N/A") if verdict else "PENDING",
+            "summary":         verdict.get("summary", "") if verdict else "",
+            "detection_label": forensics.get("detection_label", "BRUTE_FORCE"),
+            "abuse_score":     forensics.get("abuse_score", 0),
+            "timing_pattern":  forensics.get("timing_pattern", "INSUFFICIENT_DATA"),
+            "usernames":       "|".join(forensics.get("detected_usernames", [])),
+            "repeat_offender": forensics.get("repeat_offender", False),
+            "anomaly_score":   forensics.get("anomaly_score", ""),
         })
     with open(config.TEXT_REPORT_PATH, "a") as f:
         f.write("=" * 70 + "\n")

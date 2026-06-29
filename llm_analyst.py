@@ -138,6 +138,8 @@ def analyze_threat(forensics):
     ip = forensics.get("attacker_ip", "unknown")
 
     abuse_data = threat_intel.lookup(ip)
+    forensics["abuse_score"]         = abuse_data.get("abuse_confidence_score", 0)
+    forensics["abuse_total_reports"] = abuse_data.get("total_reports", 0)
 
     print("  [*] Sending forensics to Groq (" + str(config.GROQ_MODEL) + ")...")
     prompt = build_prompt(forensics, abuse_data=abuse_data)

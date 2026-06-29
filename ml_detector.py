@@ -10,6 +10,8 @@ import numpy as np
 import joblib
 import tensorflow as tf
 from collections import deque
+from datetime import datetime
+import csv as _csv
 
 # ── Suppress TensorFlow / oneDNN noise ──────────────────────────────────────
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -20,6 +22,7 @@ MODEL_DIR   = os.path.expanduser("~/project-aegis/ml_data/model")
 MODEL_PATH  = os.path.join(MODEL_DIR, "aegis_model.keras")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
 META_PATH   = os.path.join(MODEL_DIR, "metadata.json")
+SCORES_CSV  = os.path.join(os.path.expanduser("~/project-aegis"), "ml_data", "anomaly_scores.csv")
 
 # ── Module state ─────────────────────────────────────────────────────────────
 _model      = None
@@ -31,6 +34,26 @@ _window     = deque(maxlen=20)
 _ready      = False
 _version    = 0          # increments every time model is reloaded from disk
 _phase      = "WARMING UP"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def _log_score(score, is_anomaly):
+    """Append one anomaly score reading to CSV for dashboard consumption."""
+    try:
+        os.makedirs(os.path.dirname(SCORES_CSV), exist_ok=True)
+        write_header = not os.path.exists(SCORES_CSV)
+        with open(SCORES_CSV, "a", newline="") as f:
+            writer = _csv.writer(f)
+            if write_header:
+                writer.writerow(["timestamp", "score", "is_anomaly", "threshold"])
+            writer.writerow([
+                datetime.now().isoformat(),
+                round(score, 8),
+                is_anomaly,
+                round(_threshold, 8),
+            ])
+    except Exception:
+        pass   # never let logging break inference
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +87,7 @@ def load_model(path_override=None):
             with open(META_PATH, "r") as f:
                 meta = json.load(f)
             _threshold  = meta.get("threshold",  _threshold)
-            _timesteps  = meta.get("timesteps",  _timesteps)
+            _timesteps  = meta.get("timesteps", meta.get("sequence_length", _timesteps))
             _n_features = meta.get("n_features", _n_features)
 
         # Resize window if timesteps changed
@@ -132,6 +155,7 @@ def check_for_anomaly():
         score  = float(np.mean(np.abs(X_pred - X)))
 
         is_anomaly = score > _threshold
+        _log_score(score, is_anomaly)
 
         if is_anomaly:
             print(f"[ML] ⚠  ANOMALY — score={score:.6f} > threshold={_threshold:.6f}", flush=True)
