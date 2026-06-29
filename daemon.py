@@ -331,17 +331,20 @@ def rule_engine_thread():
                     daemon=True
                 ).start()
 
-ML_INFERENCE_INTERVAL = 10
+ML_INFERENCE_INTERVAL = getattr(config, "ML_INFERENCE_INTERVAL", 10)
 
 # ML_ANOMALY pipeline trigger cooldown — prevents re-firing the full
 # Groq pipeline every tick while a sustained anomaly stays above threshold.
-ML_ANOMALY_COOLDOWN_SECONDS = 300  # 5 minutes, matches trainer.py blackout window
+ML_ANOMALY_COOLDOWN_SECONDS = getattr(config, "ML_ANOMALY_COOLDOWN_SECONDS", 300)
+ML_ANOMALY_CONSECUTIVE_REQUIRED = getattr(config, "ML_ANOMALY_CONSECUTIVE_REQUIRED", 3)
+ML_DRIFT_RATIO_GUARD = getattr(config, "ML_DRIFT_RATIO_GUARD", 25)
 _last_ml_anomaly_trigger = 0
+_ml_anomaly_consecutive = 0
 _ml_anomaly_lock = threading.Lock()
 
 
 def ml_inference_thread():
-    global _last_ml_anomaly_trigger
+    global _last_ml_anomaly_trigger, _ml_anomaly_consecutive
     print("[ML INFERENCE] Starting")
     time.sleep(15)
     while True:
@@ -352,26 +355,46 @@ def ml_inference_thread():
                 print(f"[ML INFERENCE] Phase: {phase} - waiting for model")
             else:
                 score, is_anomaly = result
-                phase = ml_detector.get_status().get('phase', 'UNKNOWN')
-                print(f"[ML INFERENCE] Score: {score:.6f} | Threshold: {ml_detector.get_status().get('threshold', 0):.6f} | Phase: {phase}")
+                status = ml_detector.get_status()
+                phase = status.get('phase', 'UNKNOWN')
+                threshold = float(status.get('threshold', 0) or 0)
+                last_sample = status.get("last_sample", {})
+                recent_failed_logins = float(last_sample.get("failed_logins", 0) or 0)
+                ratio = (float(score) / threshold) if threshold > 0 else 0
+                print(f"[ML INFERENCE] Score: {score:.6f} | Threshold: {threshold:.6f} | Phase: {phase}")
                 if is_anomaly:
-                    print(f"[ML INFERENCE] *** ML_ANOMALY DETECTED *** Score={score:.6f}")
-                    trainer.register_incident()
+                    _ml_anomaly_consecutive += 1
+                    print(
+                        f"[ML INFERENCE] Anomalous score observed "
+                        f"({_ml_anomaly_consecutive}/{ML_ANOMALY_CONSECUTIVE_REQUIRED}) "
+                        f"Score={score:.6f} Ratio={ratio:.1f}x"
+                    )
 
                     with _ml_anomaly_lock:
                         now = time.time()
                         seconds_since_last = now - _last_ml_anomaly_trigger
                         if seconds_since_last < ML_ANOMALY_COOLDOWN_SECONDS:
-                            print(f"[ML INFERENCE] Cooldown active ({seconds_since_last:.0f}s/{ML_ANOMALY_COOLDOWN_SECONDS}s) — skipping pipeline trigger, anomaly already logged.")
+                            print(f"[ML INFERENCE] Cooldown active ({seconds_since_last:.0f}s/{ML_ANOMALY_COOLDOWN_SECONDS}s) — score logged only.")
+                        elif _ml_anomaly_consecutive < ML_ANOMALY_CONSECUTIVE_REQUIRED:
+                            print("[ML INFERENCE] Waiting for sustained anomaly before opening an incident.")
+                        elif ratio >= ML_DRIFT_RATIO_GUARD and recent_failed_logins == 0:
+                            print(
+                                f"[ML INFERENCE] Model drift guard active: score is {ratio:.1f}x threshold "
+                                "with zero recent auth failures. Score logged, incident suppressed. "
+                                "Retrain the baseline model if this persists."
+                            )
                         else:
                             _last_ml_anomaly_trigger = now
+                            trainer.register_incident()
                             extra = {
                                 "anomaly_score": round(float(score), 6),
-                                "anomaly_threshold": round(float(ml_detector.get_status().get('threshold', 0)), 6),
+                                "anomaly_threshold": round(threshold, 6),
+                                "anomaly_ratio": round(float(ratio), 3),
+                                "recent_failed_logins": int(recent_failed_logins),
                                 "ml_phase": phase,
                                 "detection_description": (
                                     "Behavioral anomaly detected by AI model. "
-                                    f"Reconstruction error {score:.6f} exceeds threshold {ml_detector.get_status().get('threshold', 0):.6f}."
+                                    f"Reconstruction error {score:.6f} exceeds threshold {threshold:.6f}."
                                 )
                             }
                             threading.Thread(
@@ -384,6 +407,8 @@ def ml_inference_thread():
                                 },
                                 daemon=True
                             ).start()
+                else:
+                    _ml_anomaly_consecutive = 0
         except Exception as e:
             print(f"[ML INFERENCE] Error: {e}")
         time.sleep(ML_INFERENCE_INTERVAL)

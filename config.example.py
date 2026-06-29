@@ -17,6 +17,14 @@ TIME_WINDOW_SECONDS = 120
 # Telemetry
 TELEMETRY_INTERVAL = 30
 
+# ML anomaly incident gating
+# Scores are always logged to ml_data/anomaly_scores.csv, but an incident is
+# only opened after sustained anomalies and cooldown checks pass.
+ML_INFERENCE_INTERVAL = 10
+ML_ANOMALY_COOLDOWN_SECONDS = 300
+ML_ANOMALY_CONSECUTIVE_REQUIRED = 3
+ML_DRIFT_RATIO_GUARD = 25
+
 # Reports
 CSV_REPORT_PATH = os.path.join(BASE_DIR, "reports", "incidents.csv")
 TEXT_REPORT_PATH = os.path.join(BASE_DIR, "reports", "incidents.txt")

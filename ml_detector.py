@@ -35,6 +35,7 @@ _window     = deque(maxlen=20)
 _ready      = False
 _version    = 0          # increments every time model is reloaded from disk
 _phase      = "WARMING UP"
+_last_sample = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,14 +121,24 @@ def add_sample(cpu_percent, ram_percent, failed_logins,
     Push one telemetry snapshot into the rolling window.
     Called every 10 seconds by the data collector thread.
     """
-    _window.append([
+    global _last_sample
+    sample = [
         float(cpu_percent),
         float(ram_percent),
         float(failed_logins),
         float(active_users),
         float(open_ports),
         float(hour_of_day),
-    ])
+    ]
+    _window.append(sample)
+    _last_sample = {
+        "cpu_percent": sample[0],
+        "ram_percent": sample[1],
+        "failed_logins": sample[2],
+        "active_users": sample[3],
+        "open_ports": sample[4],
+        "hour_of_day": sample[5],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,5 +199,6 @@ def get_status():
         "window_size": len(_window),
         "window_full": len(_window) >= _timesteps,
         "timesteps":   _timesteps,
+        "last_sample": dict(_last_sample),
     }
 
