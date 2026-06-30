@@ -1,0 +1,19 @@
+[Unit]
+Description=Project Aegis security monitoring daemon
+After=network-online.target rsyslog.service ufw.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/project-aegis
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/etc/project-aegis:/opt/project-aegis
+ExecStart=/usr/bin/aegis-daemon
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

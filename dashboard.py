@@ -9,13 +9,18 @@ and blocklist files. No Streamlit server and no browser are used.
 
 from __future__ import annotations
 
+import importlib
+import ipaddress
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import psutil
@@ -29,14 +34,19 @@ try:
     from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QRadialGradient
     from PySide6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QFrame,
         QGridLayout,
         QHBoxLayout,
         QHeaderView,
         QLabel,
+        QLineEdit,
         QMainWindow,
+        QMessageBox,
+        QPushButton,
         QScrollArea,
         QSizePolicy,
+        QSpinBox,
         QStackedWidget,
         QTableWidget,
         QTableWidgetItem,
@@ -65,6 +75,102 @@ AMBER = "#f4b24a"
 RED = "#ff4d6d"
 PURPLE = "#b785ff"
 
+
+CONFIG_PATH = Path(config.__file__).resolve()
+
+
+def _is_real_secret(value):
+    value = str(value or "")
+    return bool(value) and not value.startswith("your_")
+
+
+def _serialize_config_value(value):
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, (list, dict)):
+        return repr(value)
+    return repr(value)
+
+
+def _split_whitelist(text):
+    values = []
+    for chunk in str(text).replace(",", "\n").splitlines():
+        value = chunk.strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _validate_whitelist(values):
+    invalid = []
+    for value in values:
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            invalid.append(value)
+    return invalid
+
+
+def _config_snapshot():
+    base_dir = getattr(config, "BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
+    return {
+        "BASE_DIR": base_dir,
+        "GROQ_API_KEY": getattr(config, "GROQ_API_KEY", ""),
+        "GROQ_MODEL": getattr(config, "GROQ_MODEL", "openai/gpt-oss-120b"),
+        "AUTH_LOG_PATH": getattr(config, "AUTH_LOG_PATH", "/var/log/auth.log"),
+        "FAILED_LOGIN_THRESHOLD": int(getattr(config, "FAILED_LOGIN_THRESHOLD", 5)),
+        "TIME_WINDOW_SECONDS": int(getattr(config, "TIME_WINDOW_SECONDS", 120)),
+        "TELEMETRY_INTERVAL": int(getattr(config, "TELEMETRY_INTERVAL", 30)),
+        "CSV_REPORT_PATH": getattr(config, "CSV_REPORT_PATH", os.path.join(base_dir, "reports", "incidents.csv")),
+        "TEXT_REPORT_PATH": getattr(config, "TEXT_REPORT_PATH", os.path.join(base_dir, "reports", "incidents.txt")),
+        "DISCORD_WEBHOOK_URL": getattr(config, "DISCORD_WEBHOOK_URL", ""),
+        "ABUSEIPDB_API_KEY": getattr(config, "ABUSEIPDB_API_KEY", ""),
+        "DRY_RUN": bool(getattr(config, "DRY_RUN", True)),
+        "IP_WHITELIST": list(getattr(config, "IP_WHITELIST", [])),
+        "BLOCK_EXPIRY": dict(getattr(config, "BLOCK_EXPIRY", {})),
+        "DISCORD_ESCALATION": dict(getattr(config, "DISCORD_ESCALATION", {})),
+        "ML_INFERENCE_INTERVAL": int(getattr(config, "ML_INFERENCE_INTERVAL", 10)),
+        "ML_ANOMALY_COOLDOWN_SECONDS": int(getattr(config, "ML_ANOMALY_COOLDOWN_SECONDS", 300)),
+        "ML_ANOMALY_CONSECUTIVE_REQUIRED": int(getattr(config, "ML_ANOMALY_CONSECUTIVE_REQUIRED", 3)),
+        "ML_DRIFT_RATIO_GUARD": int(getattr(config, "ML_DRIFT_RATIO_GUARD", 25)),
+    }
+
+
+def _write_config_file(data):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if CONFIG_PATH.exists():
+        backup = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + f".{datetime.now().strftime('%Y%m%d%H%M%S')}.bak")
+        shutil.copy2(CONFIG_PATH, backup)
+
+    keys = [
+        "BASE_DIR", "GROQ_API_KEY", "GROQ_MODEL", "AUTH_LOG_PATH",
+        "FAILED_LOGIN_THRESHOLD", "TIME_WINDOW_SECONDS", "TELEMETRY_INTERVAL",
+        "CSV_REPORT_PATH", "TEXT_REPORT_PATH", "DISCORD_WEBHOOK_URL",
+        "ABUSEIPDB_API_KEY", "DRY_RUN", "IP_WHITELIST", "BLOCK_EXPIRY",
+        "DISCORD_ESCALATION", "ML_INFERENCE_INTERVAL", "ML_ANOMALY_COOLDOWN_SECONDS",
+        "ML_ANOMALY_CONSECUTIVE_REQUIRED", "ML_DRIFT_RATIO_GUARD",
+    ]
+    lines = [
+        "# Project Aegis - Local Configuration",
+        "# Managed by the dashboard settings tab. Keep this file private.",
+        "",
+    ]
+    lines.extend(f"{key} = {_serialize_config_value(data[key])}" for key in keys)
+
+    fd, tmp_path = tempfile.mkstemp(prefix="config.", suffix=".py", dir=str(CONFIG_PATH.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.replace(tmp_path, CONFIG_PATH)
+        if os.name == "posix":
+            os.chmod(CONFIG_PATH, 0o600)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 def _csv(path, n=None):
     if not os.path.exists(path):
@@ -522,7 +628,7 @@ class Dashboard(QMainWindow):
         self.nav.outer.addWidget(sub)
 
         self.nav_buttons = []
-        for idx, text in enumerate(["Overview", "Incidents", "ML Status", "Timeline", "Blocks"]):
+        for idx, text in enumerate(["Overview", "Incidents", "ML Status", "Timeline", "Blocks", "Settings"]):
             button = NavButton(text, idx, self.set_page)
             self.nav_buttons.append(button)
             self.nav.outer.addWidget(button)
@@ -566,6 +672,7 @@ class Dashboard(QMainWindow):
         self._build_ml()
         self._build_timeline()
         self._build_blocks()
+        self._build_settings()
         self.set_page(0)
 
         self.timer = QTimer(self)
@@ -714,6 +821,218 @@ class Dashboard(QMainWindow):
         self.whitelist_text.setMaximumHeight(140)
         layout.addWidget(self._panel("IP Whitelist", self.whitelist_text))
         self.stack.addWidget(page)
+
+    def _settings_row(self, layout, label_text, widget, row, hint=None):
+        label = QLabel(label_text)
+        label.setObjectName("TinyLabel")
+        layout.addWidget(label, row, 0)
+        layout.addWidget(widget, row, 1)
+        if hint:
+            note = QLabel(hint)
+            note.setObjectName("Muted")
+            note.setWordWrap(True)
+            layout.addWidget(note, row, 2)
+
+    def _line_input(self, value="", secret=False, placeholder=""):
+        field = QLineEdit()
+        field.setText(str(value or ""))
+        field.setPlaceholderText(placeholder)
+        if secret:
+            field.setEchoMode(QLineEdit.Password)
+        return field
+
+    def _spin_input(self, value, minimum=1, maximum=86400):
+        field = QSpinBox()
+        field.setRange(minimum, maximum)
+        field.setValue(int(value))
+        return field
+
+    def _build_settings(self):
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(12)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("TransparentScroll")
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(14)
+
+        config_banner = QLabel(f"Config file: {CONFIG_PATH}")
+        config_banner.setObjectName("WarningText")
+        config_banner.setWordWrap(True)
+        layout.addWidget(config_banner)
+
+        general = GlassPanel("Runtime Controls")
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.setting_base_dir = self._line_input(getattr(config, "BASE_DIR", ""))
+        self.setting_auth_log = self._line_input(getattr(config, "AUTH_LOG_PATH", "/var/log/auth.log"))
+        self.setting_dry_run = QCheckBox("Dry-run mode")
+        self.setting_dry_run.setChecked(bool(getattr(config, "DRY_RUN", True)))
+        self.setting_whitelist = QTextEdit()
+        self.setting_whitelist.setPlainText("\n".join(str(ip) for ip in getattr(config, "IP_WHITELIST", [])))
+        self.setting_whitelist.setMaximumHeight(112)
+        self._settings_row(grid, "Base directory", self.setting_base_dir, 0, "Reports and ML artifacts live here.")
+        self._settings_row(grid, "Auth log path", self.setting_auth_log, 1, "Usually /var/log/auth.log on Debian/Kali.")
+        self._settings_row(grid, "Firewall mode", self.setting_dry_run, 2, "Keep dry-run on until your admin IP is whitelisted.")
+        self._settings_row(grid, "IP whitelist", self.setting_whitelist, 3, "One IP per line. Required before live blocking.")
+        general.outer.addLayout(grid)
+        layout.addWidget(general)
+
+        detection = GlassPanel("Detection Thresholds")
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.setting_failed_threshold = self._spin_input(getattr(config, "FAILED_LOGIN_THRESHOLD", 5), 1, 1000)
+        self.setting_time_window = self._spin_input(getattr(config, "TIME_WINDOW_SECONDS", 120), 10, 86400)
+        self.setting_telemetry = self._spin_input(getattr(config, "TELEMETRY_INTERVAL", 30), 1, 3600)
+        self.setting_ml_interval = self._spin_input(getattr(config, "ML_INFERENCE_INTERVAL", 10), 1, 3600)
+        self.setting_ml_cooldown = self._spin_input(getattr(config, "ML_ANOMALY_COOLDOWN_SECONDS", 300), 0, 86400)
+        self.setting_ml_required = self._spin_input(getattr(config, "ML_ANOMALY_CONSECUTIVE_REQUIRED", 3), 1, 100)
+        self.setting_ml_drift = self._spin_input(getattr(config, "ML_DRIFT_RATIO_GUARD", 25), 1, 10000)
+        self._settings_row(grid, "Failed login threshold", self.setting_failed_threshold, 0)
+        self._settings_row(grid, "Time window seconds", self.setting_time_window, 1)
+        self._settings_row(grid, "Telemetry interval", self.setting_telemetry, 2)
+        self._settings_row(grid, "ML inference interval", self.setting_ml_interval, 3)
+        self._settings_row(grid, "ML anomaly cooldown", self.setting_ml_cooldown, 4)
+        self._settings_row(grid, "Consecutive ML anomalies", self.setting_ml_required, 5)
+        self._settings_row(grid, "ML drift ratio guard", self.setting_ml_drift, 6)
+        detection.outer.addLayout(grid)
+        layout.addWidget(detection)
+
+        integrations = GlassPanel("Integrations")
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.setting_groq_model = self._line_input(getattr(config, "GROQ_MODEL", "openai/gpt-oss-120b"))
+        self.setting_groq_key = self._line_input(secret=True, placeholder="Leave blank to keep current Groq key")
+        self.setting_discord_webhook = self._line_input(secret=True, placeholder="Leave blank to keep current Discord webhook")
+        self.setting_abuse_key = self._line_input(secret=True, placeholder="Leave blank to keep current AbuseIPDB key")
+        self.secret_status = QLabel(self._secret_status_text())
+        self.secret_status.setObjectName("Muted")
+        self.secret_status.setWordWrap(True)
+        self._settings_row(grid, "Groq model", self.setting_groq_model, 0)
+        self._settings_row(grid, "Groq API key", self.setting_groq_key, 1, "Existing secret is never displayed.")
+        self._settings_row(grid, "Discord webhook", self.setting_discord_webhook, 2, "Paste a replacement only when rotating it.")
+        self._settings_row(grid, "AbuseIPDB key", self.setting_abuse_key, 3, "Blank means keep the saved value.")
+        grid.addWidget(self.secret_status, 4, 1, 1, 2)
+        integrations.outer.addLayout(grid)
+        layout.addWidget(integrations)
+
+        reports = GlassPanel("Report Paths")
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.setting_csv_path = self._line_input(getattr(config, "CSV_REPORT_PATH", ""))
+        self.setting_text_path = self._line_input(getattr(config, "TEXT_REPORT_PATH", ""))
+        self._settings_row(grid, "CSV report path", self.setting_csv_path, 0)
+        self._settings_row(grid, "Text report path", self.setting_text_path, 1)
+        reports.outer.addLayout(grid)
+        layout.addWidget(reports)
+
+        actions = QHBoxLayout()
+        self.settings_status = QLabel("")
+        self.settings_status.setObjectName("Muted")
+        self.save_settings_button = QPushButton("Save Settings")
+        self.save_settings_button.clicked.connect(self._save_settings)
+        self.reload_settings_button = QPushButton("Reload From Disk")
+        self.reload_settings_button.clicked.connect(self._reload_settings_page)
+        actions.addWidget(self.settings_status, 1)
+        actions.addWidget(self.reload_settings_button)
+        actions.addWidget(self.save_settings_button)
+        layout.addLayout(actions)
+        layout.addStretch()
+
+        scroll.setWidget(container)
+        page_layout.addWidget(scroll)
+        self.stack.addWidget(page)
+
+    def _secret_status_text(self):
+        return " | ".join(
+            f"{label}: {'configured' if _is_real_secret(getattr(config, field, '')) else 'not set'}"
+            for label, field in [
+                ("Groq", "GROQ_API_KEY"),
+                ("Discord", "DISCORD_WEBHOOK_URL"),
+                ("AbuseIPDB", "ABUSEIPDB_API_KEY"),
+            ]
+        )
+
+    def _reload_settings_page(self):
+        importlib.reload(config)
+        importlib.reload(runtime_paths)
+        self.setting_base_dir.setText(str(getattr(config, "BASE_DIR", "")))
+        self.setting_auth_log.setText(str(getattr(config, "AUTH_LOG_PATH", "/var/log/auth.log")))
+        self.setting_dry_run.setChecked(bool(getattr(config, "DRY_RUN", True)))
+        self.setting_whitelist.setPlainText("\n".join(str(ip) for ip in getattr(config, "IP_WHITELIST", [])))
+        self.setting_failed_threshold.setValue(int(getattr(config, "FAILED_LOGIN_THRESHOLD", 5)))
+        self.setting_time_window.setValue(int(getattr(config, "TIME_WINDOW_SECONDS", 120)))
+        self.setting_telemetry.setValue(int(getattr(config, "TELEMETRY_INTERVAL", 30)))
+        self.setting_ml_interval.setValue(int(getattr(config, "ML_INFERENCE_INTERVAL", 10)))
+        self.setting_ml_cooldown.setValue(int(getattr(config, "ML_ANOMALY_COOLDOWN_SECONDS", 300)))
+        self.setting_ml_required.setValue(int(getattr(config, "ML_ANOMALY_CONSECUTIVE_REQUIRED", 3)))
+        self.setting_ml_drift.setValue(int(getattr(config, "ML_DRIFT_RATIO_GUARD", 25)))
+        self.setting_groq_model.setText(str(getattr(config, "GROQ_MODEL", "openai/gpt-oss-120b")))
+        self.setting_groq_key.clear()
+        self.setting_discord_webhook.clear()
+        self.setting_abuse_key.clear()
+        self.secret_status.setText(self._secret_status_text())
+        self.setting_csv_path.setText(str(getattr(config, "CSV_REPORT_PATH", "")))
+        self.setting_text_path.setText(str(getattr(config, "TEXT_REPORT_PATH", "")))
+        self.settings_status.setText("Settings reloaded from disk.")
+
+    def _collect_settings(self):
+        whitelist = _split_whitelist(self.setting_whitelist.toPlainText())
+        invalid_ips = _validate_whitelist(whitelist)
+        if invalid_ips:
+            raise ValueError(f"Invalid whitelist IP entries: {', '.join(invalid_ips)}")
+        if not self.setting_dry_run.isChecked() and not whitelist:
+            raise ValueError("Live blocking requires at least one admin IP in the whitelist.")
+        data = _config_snapshot()
+        data.update({
+            "BASE_DIR": self.setting_base_dir.text().strip(),
+            "AUTH_LOG_PATH": self.setting_auth_log.text().strip(),
+            "FAILED_LOGIN_THRESHOLD": self.setting_failed_threshold.value(),
+            "TIME_WINDOW_SECONDS": self.setting_time_window.value(),
+            "TELEMETRY_INTERVAL": self.setting_telemetry.value(),
+            "CSV_REPORT_PATH": self.setting_csv_path.text().strip(),
+            "TEXT_REPORT_PATH": self.setting_text_path.text().strip(),
+            "DRY_RUN": self.setting_dry_run.isChecked(),
+            "IP_WHITELIST": whitelist,
+            "GROQ_MODEL": self.setting_groq_model.text().strip() or "openai/gpt-oss-120b",
+            "ML_INFERENCE_INTERVAL": self.setting_ml_interval.value(),
+            "ML_ANOMALY_COOLDOWN_SECONDS": self.setting_ml_cooldown.value(),
+            "ML_ANOMALY_CONSECUTIVE_REQUIRED": self.setting_ml_required.value(),
+            "ML_DRIFT_RATIO_GUARD": self.setting_ml_drift.value(),
+        })
+        for field, widget in [
+            ("GROQ_API_KEY", self.setting_groq_key),
+            ("DISCORD_WEBHOOK_URL", self.setting_discord_webhook),
+            ("ABUSEIPDB_API_KEY", self.setting_abuse_key),
+        ]:
+            value = widget.text().strip()
+            if value:
+                if value.startswith("your_"):
+                    raise ValueError(f"{field} looks like a placeholder. Leave it blank to keep the current secret.")
+                data[field] = value
+        return data
+
+    def _save_settings(self):
+        try:
+            data = self._collect_settings()
+            _write_config_file(data)
+            importlib.reload(config)
+            importlib.reload(runtime_paths)
+            runtime_paths.ensure_runtime_dirs()
+            self._reload_settings_page()
+            self.settings_status.setText("Settings saved. Restart aegis-daemon for daemon-only changes.")
+            QMessageBox.information(self, "Settings Saved", "Settings were saved. Secrets were not echoed back to the UI. Restart aegis-daemon for daemon-only changes.")
+            self.refresh()
+        except PermissionError as exc:
+            self.settings_status.setText("Permission denied while saving config.")
+            QMessageBox.critical(self, "Save Failed", f"Permission denied writing {CONFIG_PATH}:\n{exc}")
+        except Exception as exc:
+            self.settings_status.setText("Settings not saved.")
+            QMessageBox.warning(self, "Save Failed", str(exc))
 
     def refresh(self):
         self.clock.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
@@ -941,6 +1260,44 @@ QLabel#WarningText {{
     border: 1px solid rgba(244, 178, 74, 80);
     border-radius: 8px;
     padding: 10px 12px;
+}}
+QLineEdit, QSpinBox, QTextEdit {{
+    background: rgba(8, 18, 15, 190);
+    color: #e4fff3;
+    border: 1px solid rgba(58, 255, 181, 45);
+    border-radius: 8px;
+    padding: 8px 10px;
+    selection-background-color: rgba(38, 240, 165, 90);
+}}
+QLineEdit:focus, QSpinBox:focus, QTextEdit:focus {{
+    border: 1px solid rgba(38, 240, 165, 155);
+}}
+QCheckBox {{
+    color: #e4fff3;
+    spacing: 8px;
+}}
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1px solid rgba(58, 255, 181, 95);
+    background: rgba(8, 18, 15, 210);
+}}
+QCheckBox::indicator:checked {{
+    background: #24f0a1;
+    border-color: #24f0a1;
+}}
+QPushButton {{
+    color: #e4fff3;
+    background: rgba(14, 45, 34, 210);
+    border: 1px solid rgba(38, 240, 165, 105);
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-weight: 800;
+}}
+QPushButton:hover {{
+    background: rgba(24, 72, 54, 225);
+    border-color: rgba(38, 240, 165, 180);
 }}
 QTableWidget {{
     background: rgba(8, 18, 15, 180);

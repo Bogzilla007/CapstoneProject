@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -e
+
+mkdir -p /var/lib/project-aegis/reports /var/lib/project-aegis/ml_data/model
+chmod 755 /var/lib/project-aegis /var/lib/project-aegis/reports /var/lib/project-aegis/ml_data /var/lib/project-aegis/ml_data/model
+
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications || true
+fi
+
+cat <<'MSG'
+Project Aegis installed.
+
+Next steps:
+  1. Install Python runtime packages:
+     sudo python3 -m pip install -r /usr/share/doc/project-aegis/requirements.txt --break-system-packages
+  2. Edit configuration:
+     sudo nano /etc/project-aegis/config.py
+  3. Enable and start the daemon:
+     sudo systemctl enable --now aegis-daemon
+  4. Open the desktop console:
+     aegis-dashboard
+MSG

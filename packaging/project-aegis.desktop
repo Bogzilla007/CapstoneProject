@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Project Aegis
+Comment=Native desktop console for Project Aegis
+Exec=aegis-dashboard
+Path=/opt/project-aegis
+Terminal=false
+Categories=System;Security;

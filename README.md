@@ -83,6 +83,24 @@ git clone https://github.com/Bogzilla007/CapstoneProject.git
 cd CapstoneProject
 ```
 
+## Build A Debian Package
+
+Project Aegis can also be installed as a normal `.deb` package. Build it on a Debian/Kali/Linux system:
+
+```bash
+sudo apt update
+sudo apt install dpkg-dev rsync -y
+bash build_deb.sh
+```
+
+Install the generated package:
+
+```bash
+sudo apt install ./dist/project-aegis_0.1.0_all.deb
+```
+
+The package installs the app under `/opt/project-aegis`, configuration under `/etc/project-aegis/config.py`, runtime data under `/var/lib/project-aegis`, launchers under `/usr/bin`, and the `aegis-daemon` systemd service. See `PACKAGING.md` for the full package workflow.
+
 Install Linux packages:
 
 ```bash

@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+export PYTHONPATH="/etc/project-aegis:/opt/project-aegis${PYTHONPATH:+:$PYTHONPATH}"
+cd /opt/project-aegis
+exec python3 -u /opt/project-aegis/daemon.py "$@"

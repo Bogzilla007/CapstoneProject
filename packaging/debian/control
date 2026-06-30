@@ -1,0 +1,12 @@
+Package: project-aegis
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Project Aegis Maintainers <root@localhost>
+Depends: python3, python3-pip, rsyslog, ufw, openssh-server, iproute2, whois, procps
+Recommends: python3-venv, python3-pyside6.qtwidgets, python3-numpy, python3-pandas, python3-psutil, python3-sklearn, python3-joblib
+Description: Native Linux security monitoring daemon and desktop console
+ Project Aegis monitors SSH authentication logs, collects host telemetry,
+ detects brute-force and behavioral anomalies, enriches incidents, applies
+ UFW mitigation decisions, and displays status in a PySide6 desktop dashboard.
