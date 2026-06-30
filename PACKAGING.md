@@ -21,7 +21,7 @@ bash build_deb.sh
 The package is written to:
 
 ```text
-dist/project-aegis_0.1.1_all.deb
+dist/project-aegis_0.1.2_all.deb
 ```
 
 You can override version and architecture:
@@ -33,7 +33,7 @@ VERSION=1.0.0 ARCH=amd64 bash build_deb.sh
 ## Install
 
 ```bash
-sudo apt install ./dist/project-aegis_0.1.1_all.deb
+sudo apt install ./dist/project-aegis_0.1.2_all.deb
 ```
 
 The package installs:

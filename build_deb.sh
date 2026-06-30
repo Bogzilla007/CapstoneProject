@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PACKAGE_NAME="project-aegis"
-VERSION="${VERSION:-0.1.1}"
+VERSION="${VERSION:-0.1.2}"
 ARCH="${ARCH:-all}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"

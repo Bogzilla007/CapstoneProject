@@ -31,7 +31,7 @@ from system_checks import get_full_system_snapshot
 
 try:
     from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-    from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QShortcut
+    from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -723,10 +723,63 @@ class IncidentCard(QFrame):
         self.setMinimumHeight(112)
 
 
+class BrandWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(204, 80)
+        self.shield_pixmap = QPixmap("logo_shield.png")
+        self.text_pixmap = QPixmap("logo_text.png")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        
+        W = self.width()  # 236
+        H = self.height()  # 80
+        
+        # Compute shield dimensions (height-limited to 72)
+        sh = 72
+        sw = int(self.shield_pixmap.width() * sh / self.shield_pixmap.height()) if not self.shield_pixmap.isNull() else 0
+        gap = 6
+        
+        # Compute text dimensions (fit remaining space)
+        max_tw = 150
+        if not self.text_pixmap.isNull() and self.text_pixmap.width() > 0:
+            tw = min(max_tw, W - sw - gap - 20)
+            th = int(self.text_pixmap.height() * tw / self.text_pixmap.width())
+        else:
+            tw, th = 0, 0
+        
+        # Total content width and centering offset
+        total_w = sw + gap + tw
+        x_offset = (W - total_w) // 2
+        
+        # 1. Draw shield, centered
+        if not self.shield_pixmap.isNull():
+            y_shield = (H - sh) // 2
+            painter.drawPixmap(
+                QRectF(x_offset, y_shield, sw, sh),
+                self.shield_pixmap,
+                QRectF(self.shield_pixmap.rect())
+            )
+        
+        # 2. Draw "AEGIS" text to the right of shield, vertically centered
+        if not self.text_pixmap.isNull() and tw > 0:
+            x_text = x_offset + sw + gap
+            y_text = (H - th) // 2
+            painter.drawPixmap(
+                QRectF(x_text, y_text, tw, th),
+                self.text_pixmap,
+                QRectF(self.text_pixmap.rect())
+            )
+
+
 class Dashboard(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Project Aegis")
+        self.setWindowIcon(QIcon("logo_shield.png"))
         self.resize(1480, 920)
         self.setMinimumSize(960, 640)
         self.backdrop = AnimatedBackdrop()
@@ -739,12 +792,11 @@ class Dashboard(QMainWindow):
         self.nav = GlassPanel()
         self.nav.setObjectName("NavRail")
         self.nav.setFixedWidth(236)
-        brand = QLabel("AEGIS")
-        brand.setObjectName("Brand")
-        self.nav.outer.addWidget(brand)
+        brand = BrandWidget()
+        self.nav.outer.addWidget(brand, alignment=Qt.AlignCenter)
         sub = QLabel("Autonomous Defense Console")
         sub.setObjectName("Muted")
-        self.nav.outer.addWidget(sub)
+        self.nav.outer.addWidget(sub, alignment=Qt.AlignCenter)
 
         self.nav_buttons = []
         for idx, text in enumerate(["Overview", "Incidents", "ML Status", "Timeline", "Blocks", "Settings"]):
