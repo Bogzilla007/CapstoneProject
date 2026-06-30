@@ -145,8 +145,15 @@ def gather_forensics(ip, failed_count, raw_log_lines, extra_context=None):
         forensics.update(extra_context)
     return forensics
 
+def _ensure_parent_dir(path):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def save_reports(forensics, verdict=None):
-    os.makedirs("reports", exist_ok=True)
+    _ensure_parent_dir(config.CSV_REPORT_PATH)
+    _ensure_parent_dir(config.TEXT_REPORT_PATH)
     csv_exists = os.path.exists(config.CSV_REPORT_PATH)
     with open(config.CSV_REPORT_PATH, "a", newline="") as f:
         fieldnames = ["timestamp", "attacker_ip", "failed_attempts",
@@ -205,6 +212,29 @@ def save_reports(forensics, verdict=None):
         f.write(f"\nRaw Log Sample:\n{forensics['raw_log_sample']}\n")
         f.write("=" * 70 + "\n\n")
     print(f"  [+] Reports saved to {config.CSV_REPORT_PATH} and {config.TEXT_REPORT_PATH}")
+
+
+def validate_runtime_config():
+    """Print production-readiness warnings without preventing dry-run testing."""
+    warnings = []
+    if not os.path.isfile(config.AUTH_LOG_PATH) or not os.access(config.AUTH_LOG_PATH, os.R_OK):
+        warnings.append(f"auth log missing or unreadable at startup: {config.AUTH_LOG_PATH}")
+    if getattr(config, "GROQ_API_KEY", "").startswith("your_"):
+        warnings.append("GROQ_API_KEY still has the template value")
+    if getattr(config, "DISCORD_WEBHOOK_URL", "").startswith("your_"):
+        warnings.append("DISCORD_WEBHOOK_URL still has the template value")
+    if getattr(config, "ABUSEIPDB_API_KEY", "").startswith("your_"):
+        warnings.append("ABUSEIPDB_API_KEY still has the template value")
+    if not getattr(config, "DRY_RUN", True) and not getattr(config, "IP_WHITELIST", []):
+        warnings.append("DRY_RUN is False but IP_WHITELIST is empty")
+
+    if warnings:
+        print("[CONFIG] Startup warnings:")
+        for warning in warnings:
+            print(f"[CONFIG] - {warning}")
+    else:
+        print("[CONFIG] Runtime config checks passed.")
+
 
 def run_pipeline(ip, label, failed_count=0, raw_log_lines=None, extra_context=None):
     if raw_log_lines is None:
@@ -460,6 +490,7 @@ def print_banner():
 
 def main():
     runtime_paths.ensure_runtime_dirs()
+    validate_runtime_config()
     print_banner()
     ml_detector.load_model()
     threat_tracker.initialize_port_baseline()
@@ -489,5 +520,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
