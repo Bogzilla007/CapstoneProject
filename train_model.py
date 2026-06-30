@@ -31,7 +31,7 @@ FEATURES = [
 EPOCHS = 100
 BATCH_SIZE = 32
 VALIDATION_SPLIT = 0.1
-ANOMALY_PERCENTILE = 95   # Top 5% reconstruction error = anomaly
+ANOMALY_PERCENTILE = 99.5   # Top 0.5% reconstruction error = anomaly
 
 # ─── Data Loading ──────────────────────────────────────────────────────────────
 

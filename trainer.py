@@ -251,10 +251,10 @@ def run_retrain():
         verbose=0
     )
 
-    # ── Calculate new threshold (95th percentile) ─────────────────────────────
+    # ── Calculate new threshold (99.5th percentile) ───────────────────────────
     preds  = model.predict(X, verbose=0)
     errors = np.mean(np.abs(preds - X), axis=(1, 2))
-    new_threshold = float(np.percentile(errors, 95))
+    new_threshold = float(np.percentile(errors, 99.5))
     print(f"[TRAINER] New threshold: {new_threshold:.6f}", flush=True)
 
     # ── Atomic swap ───────────────────────────────────────────────────────────

@@ -31,7 +31,7 @@ from system_checks import get_full_system_snapshot
 
 try:
     from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-    from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QRadialGradient
+    from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -269,16 +269,50 @@ def service_status():
         return "unknown"
 
 
+class NoWheelSpinBox(QSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class AnimatedBackdrop(QWidget):
     def __init__(self):
         super().__init__()
         self.phase = 0.0
+        
+        # Initialize 30 particles drifting slowly upwards
+        import random
+        self.particles = []
+        for _ in range(30):
+            self.particles.append({
+                "x": random.random(),
+                "y": random.random(),
+                "vx": (random.random() * 0.0008 + 0.0002) * (1 if random.random() > 0.5 else -1),
+                "vy": -(random.random() * 0.0008 + 0.0004),
+                "size": random.random() * 1.8 + 1.2,
+                "pulse_speed": random.random() * 2.8 + 1.0,
+                "pulse_phase": random.random() * 6.28
+            })
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(33)
 
     def tick(self):
         self.phase += 0.012
+        
+        # Update particles position
+        for p in self.particles:
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            if p["x"] < 0: p["x"] = 1.0
+            if p["x"] > 1.0: p["x"] = 0.0
+            if p["y"] < 0: p["y"] = 1.0
+            if p["y"] > 1.0: p["y"] = 0.0
+            
         self.update()
 
     def paintEvent(self, event):
@@ -307,24 +341,52 @@ class AnimatedBackdrop(QWidget):
         for y in range(offset, rect.height(), 28):
             painter.drawLine(0, y, rect.width(), y - rect.width() // 2)
 
-        wave_pen = QPen(QColor(38, 240, 165, 85), 1)
+        # Ribbon waves
+        wave_pen = QPen(QColor(38, 240, 165, 45), 1.2)
         painter.setPen(wave_pen)
-        base = rect.height() * 0.73
-        for lane in range(3):
+        base = rect.height() * 0.85
+        for lane in range(2):
             path = QPainterPath()
-            path.moveTo(0, base + lane * 28)
-            for x in range(0, rect.width() + 12, 12):
-                y = base + lane * 28 + math.sin(x * 0.018 + self.phase * 5 + lane) * (18 + lane * 5)
+            path.moveTo(0, base + lane * 18)
+            direction = 1 if lane % 2 == 0 else -1
+            for x in range(0, rect.width() + 15, 15):
+                y = base + lane * 18 + math.sin(x * 0.008 + direction * self.phase * 2.5 + lane) * (14 + lane * 4)
                 path.lineTo(x, y)
             painter.drawPath(path)
 
-        for i in range(34):
-            x = (i * 97 + math.sin(self.phase * 1.7 + i) * 42) % max(rect.width(), 1)
-            y = (i * 53 + math.cos(self.phase * 1.3 + i) * 36) % max(rect.height(), 1)
-            alpha = 65 + int(55 * (math.sin(self.phase * 2 + i) + 1) / 2)
+        # Draw constellation constellation lines
+        w, h = rect.width(), rect.height()
+        pts = []
+        for p in self.particles:
+            px = p["x"] * w
+            py = p["y"] * h
+            pts.append((px, py, p))
+
+        for i in range(len(pts)):
+            x1, y1, p1 = pts[i]
+            for j in range(i + 1, len(pts)):
+                x2, y2, p2 = pts[j]
+                dx = x2 - x1
+                dy = y2 - y1
+                dist_sq = dx*dx + dy*dy
+                max_dist = 110
+                if dist_sq < max_dist * max_dist:
+                    dist = math.sqrt(dist_sq)
+                    alpha = int(75 * (1.0 - dist / max_dist))
+                    painter.setPen(QPen(QColor(38, 240, 165, alpha), 0.8))
+                    painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+        # Draw constellation particles
+        for px, py, p in pts:
+            pulse = (math.sin(self.phase * p["pulse_speed"] + p["pulse_phase"]) + 1.0) / 2.0
+            alpha = int(120 + 100 * pulse)
+            size = p["size"] + pulse * 1.0
+            
             painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(38, 240, 165, int(alpha * 0.35)))
+            painter.drawEllipse(QPointF(px, py), size * 2.2, size * 2.2)
             painter.setBrush(QColor(38, 240, 165, alpha))
-            painter.drawEllipse(QPointF(x, y), 1.8, 1.8)
+            painter.drawEllipse(QPointF(px, py), size * 0.9, size * 0.9)
 
 
 class GlassPanel(QFrame):
@@ -374,7 +436,7 @@ class MetricRing(QWidget):
         self.value = 0.0
         self.label = label
         self.color = QColor(color)
-        self.setFixedSize(132, 132)
+        self.setFixedSize(150, 150)
 
     def set_value(self, value):
         self.value = max(0.0, min(100.0, float(value)))
@@ -383,26 +445,59 @@ class MetricRing(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(18, 12, self.width() - 36, self.height() - 36)
-        painter.setPen(QPen(QColor(31, 72, 58), 10, Qt.SolidLine, Qt.RoundCap))
+        
+        # Center the circular gauge in the widget area (diameter 110px)
+        rect = QRectF(20, 20, self.width() - 40, self.height() - 40)
+        
+        # 1. Sci-fi outer dashed accent ring
+        outer_rect = rect.adjusted(-4, -4, 4, 4)
+        painter.setPen(QPen(QColor(38, 240, 165, 35), 1, Qt.DashLine))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(outer_rect)
+        
+        # 2. Inner glass panel backdrop
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(6, 16, 13, 180))
+        painter.drawEllipse(rect)
+        
+        # 3. Background track ring
+        track_color = QColor(16, 38, 30)
+        painter.setPen(QPen(track_color, 8, Qt.SolidLine, Qt.RoundCap))
         painter.drawArc(rect, 90 * 16, -360 * 16)
-        painter.setPen(QPen(self.color, 10, Qt.SolidLine, Qt.RoundCap))
+        
+        # 4. Active progress arc with linear gradient
+        grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        grad.setColorAt(0.0, self.color)
+        c2 = QColor(self.color).lighter(115) if self.color.lightness() < 200 else QColor(self.color).darker(115)
+        grad.setColorAt(1.0, c2)
+        
+        progress_pen = QPen(QBrush(grad), 8, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(progress_pen)
         painter.drawArc(rect, 90 * 16, int(-360 * 16 * (self.value / 100)))
+        
+        # 5. Label in self.color (above the value inside the circle)
+        painter.setPen(self.color)
+        label_font = QFont("Inter", 9, QFont.Bold)
+        label_font.setLetterSpacing(QFont.AbsoluteSpacing, 1.5)
+        painter.setFont(label_font)
+        painter.drawText(QRectF(rect.left(), rect.top() + 26, rect.width(), 16), Qt.AlignCenter, self.label.upper())
+
+        # 6. Value Text (centered inside the circle)
         painter.setPen(QColor(TEXT))
-        painter.setFont(QFont("Segoe UI", 20, QFont.Bold))
-        painter.drawText(rect, Qt.AlignCenter, f"{self.value:.0f}")
-        painter.setPen(QColor(MUTED))
-        painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
-        painter.drawText(QRectF(0, self.height() - 28, self.width(), 18), Qt.AlignCenter, self.label.upper())
+        font = QFont("Inter", 22, QFont.Bold)
+        painter.setFont(font)
+        painter.drawText(QRectF(rect.left(), rect.top() + 46, rect.width(), 28), Qt.AlignCenter, f"{self.value:.0f}%")
 
 
 class Sparkline(QFrame):
-    def __init__(self, color=GREEN, fill=True, bar=False, height=132):
+    def __init__(self, color=GREEN, fill=True, bar=False, height=132, min_val=None, max_val=None):
         super().__init__()
         self.values = []
         self.color = QColor(color)
         self.fill = fill
         self.bar = bar
+        self.min_val = min_val
+        self.max_val = max_val
         self.setObjectName("Chart")
         self.setMinimumHeight(height)
         self.setMaximumHeight(height + 34)
@@ -415,26 +510,49 @@ class Sparkline(QFrame):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(12, 12, -12, -14)
-        painter.setPen(QPen(QColor(25, 64, 50, 80), 1))
-        for i in range(1, 4):
+        
+        # Adjust left margin to 45px to leave room for Y-axis labels
+        rect = self.rect().adjusted(45, 12, -12, -14)
+        
+        mn = self.min_val if self.min_val is not None else (min(self.values) if self.values else 0.0)
+        mx = self.max_val if self.max_val is not None else (max(self.values) if self.values else 1.0)
+        if mn == mx:
+            mx = mn + 1.0
+
+        # Draw grid lines and Y-axis labels
+        painter.setFont(QFont("Inter", 8))
+        for i in range(5):
+            val = mx - (mx - mn) * i / 4
             y = rect.top() + rect.height() * i / 4
+            
+            # Grid line
+            painter.setPen(QPen(QColor(25, 64, 50, 40 if i in (0, 4) else 80), 1))
             painter.drawLine(rect.left(), int(y), rect.right(), int(y))
+            
+            # Y-axis label text
+            painter.setPen(QColor(MUTED))
+            if abs(val) < 1e-9:
+                val_str = "0"
+            elif val >= 100:
+                val_str = f"{val:.0f}"
+            elif val >= 1:
+                val_str = f"{val:.0f}"
+            else:
+                val_str = f"{val:.3f}"
+            painter.drawText(rect.left() - 38, int(y + 4), val_str)
 
         if len(self.values) < 2:
             painter.setPen(QColor(MUTED))
             painter.drawText(rect, Qt.AlignCenter, "Awaiting telemetry")
             return
 
-        mn, mx = min(self.values), max(self.values)
-        if mn == mx:
-            mx = mn + 1
         count = len(self.values)
 
         if self.bar:
             width = max(2, rect.width() / count - 2)
             for idx, value in enumerate(self.values):
-                height = ((value - mn) / (mx - mn)) * rect.height()
+                val_clamped = max(mn, min(mx, value))
+                height = ((val_clamped - mn) / (mx - mn)) * rect.height()
                 x = rect.left() + idx * (rect.width() / count)
                 y = rect.bottom() - height
                 c = QColor(self.color)
@@ -448,8 +566,9 @@ class Sparkline(QFrame):
         path = QPainterPath()
         fill = QPainterPath()
         for idx, value in enumerate(self.values):
+            val_clamped = max(mn, min(mx, value))
             x = rect.left() + idx * step
-            y = rect.bottom() - ((value - mn) / (mx - mn)) * rect.height()
+            y = rect.bottom() - ((val_clamped - mn) / (mx - mn)) * rect.height()
             if idx == 0:
                 path.moveTo(x, y)
                 fill.moveTo(x, rect.bottom())
@@ -597,12 +716,11 @@ class IncidentCard(QFrame):
         det = QLabel(f"{row.get('detection_label', 'UNKNOWN')}  |  {row.get('action', 'N/A')}")
         det.setObjectName("TinyLabel")
         layout.addWidget(det)
-        summary = QLabel(str(row.get("summary", "No summary"))[:220])
+        summary = QLabel(str(row.get("summary", "No summary")))
         summary.setWordWrap(True)
         summary.setObjectName("IncidentSummary")
         layout.addWidget(summary)
         self.setMinimumHeight(112)
-        self.setMaximumHeight(142)
 
 
 class Dashboard(QMainWindow):
@@ -610,6 +728,7 @@ class Dashboard(QMainWindow):
         super().__init__()
         self.setWindowTitle("Project Aegis")
         self.resize(1480, 920)
+        self.setMinimumSize(960, 640)
         self.backdrop = AnimatedBackdrop()
         self.setCentralWidget(self.backdrop)
 
@@ -640,14 +759,11 @@ class Dashboard(QMainWindow):
 
         self.content_frame = QWidget()
         self.content_frame.setObjectName("ContentFrame")
-        self.content_frame.setMaximumWidth(1360)
-        self.content_frame.setMinimumWidth(920)
         self.content_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         content = QVBoxLayout(self.content_frame)
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(14)
         shell.addWidget(self.content_frame, 1)
-        shell.addStretch(1)
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
@@ -667,6 +783,8 @@ class Dashboard(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.setObjectName("MainStack")
         content.addWidget(self.stack, 1)
+        self.local_cpu_history = []
+        self.local_ram_history = []
         self._build_overview()
         self._build_incidents()
         self._build_ml()
@@ -678,6 +796,11 @@ class Dashboard(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(10_000)
+
+        self.telemetry_timer = QTimer(self)
+        self.telemetry_timer.timeout.connect(self.refresh_telemetry)
+        self.telemetry_timer.start(1000) # 1-second telemetry updates
+        
         self.refresh()
 
     def set_page(self, index):
@@ -692,8 +815,18 @@ class Dashboard(QMainWindow):
 
     def _build_overview(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("TransparentScroll")
+
+        container = QWidget()
+        container.setObjectName("ScrollContainer")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(14)
 
         row = QGridLayout()
@@ -713,21 +846,26 @@ class Dashboard(QMainWindow):
         mid.setHorizontalSpacing(14)
         mid.setVerticalSpacing(14)
         ring_panel = GlassPanel("System Pressure")
-        ring_panel.setMaximumWidth(360)
-        ring_row = QHBoxLayout()
-        ring_row.setContentsMargins(0, 8, 0, 4)
-        ring_row.setSpacing(18)
-        ring_row.addStretch()
+        ring_panel.setFixedWidth(200)
+        
+        ring_layout = QVBoxLayout()
+        ring_layout.setContentsMargins(0, 14, 0, 14)
+        
         self.cpu_ring = MetricRing("CPU", GREEN)
         self.ram_ring = MetricRing("RAM", CYAN)
-        ring_row.addWidget(self.cpu_ring)
-        ring_row.addWidget(self.ram_ring)
-        ring_row.addStretch()
-        ring_panel.outer.addLayout(ring_row)
+        
+        # Space out the gauges evenly using stretch margins
+        ring_layout.addStretch(1)
+        ring_layout.addWidget(self.cpu_ring, 0, Qt.AlignCenter)
+        ring_layout.addStretch(2)
+        ring_layout.addWidget(self.ram_ring, 0, Qt.AlignCenter)
+        ring_layout.addStretch(2)
+        
+        ring_panel.outer.addLayout(ring_layout)
         mid.addWidget(ring_panel, 0, 0, 2, 1)
 
-        self.cpu_chart = Sparkline(GREEN, fill=True, height=148)
-        self.ram_chart = Sparkline(CYAN, fill=True, height=148)
+        self.cpu_chart = Sparkline(GREEN, fill=True, height=148, min_val=0, max_val=100)
+        self.ram_chart = Sparkline(CYAN, fill=True, height=148, min_val=0, max_val=100)
         mid.addWidget(self._panel("CPU Telemetry", self.cpu_chart), 0, 1)
         mid.addWidget(self._panel("RAM Telemetry", self.ram_chart), 1, 1)
         mid.setColumnStretch(0, 0)
@@ -745,7 +883,10 @@ class Dashboard(QMainWindow):
         bottom.addWidget(self._panel("Active Users", self.users_table), 0, 1)
         bottom.setColumnStretch(0, 2)
         bottom.setColumnStretch(1, 1)
-        layout.addLayout(bottom, 1)
+        layout.addLayout(bottom)
+
+        scroll.setWidget(container)
+        page_layout.addWidget(scroll)
         self.stack.addWidget(page)
 
     def _build_incidents(self):
@@ -771,7 +912,20 @@ class Dashboard(QMainWindow):
 
     def _build_ml(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("TransparentScroll")
+
+        container = QWidget()
+        container.setObjectName("ScrollContainer")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(12)
+
         cards = QHBoxLayout()
         self.phase_card = StatCard("ML Phase", GREEN)
         self.threshold_card = StatCard("Threshold", CYAN)
@@ -781,45 +935,88 @@ class Dashboard(QMainWindow):
             cards.addWidget(card)
         layout.addLayout(cards)
         self.score_chart = Sparkline(PURPLE, fill=True)
-        layout.addWidget(self._panel("Anomaly Score Stream", self.score_chart), 1)
+        layout.addWidget(self._panel("Anomaly Score Stream", self.score_chart))
         self.ml_explain = QLabel("Scores are raw ML readings. Incidents are saved only after sustained anomaly, cooldown, and drift-guard checks pass.")
         self.ml_explain.setObjectName("Muted")
         self.ml_explain.setWordWrap(True)
         layout.addWidget(self.ml_explain)
         self.meta_text = QTextEdit()
         self.meta_text.setReadOnly(True)
-        layout.addWidget(self._panel("Model Metadata", self.meta_text), 1)
+        self.meta_text.setMinimumHeight(200)
+        layout.addWidget(self._panel("Model Metadata", self.meta_text))
+
+        scroll.setWidget(container)
+        page_layout.addWidget(scroll)
         self.stack.addWidget(page)
 
     def _build_timeline(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("TransparentScroll")
+
+        container = QWidget()
+        container.setObjectName("ScrollContainer")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(14)
+
         row = QHBoxLayout()
         self.top_ips_table = DataTable(["IP", "Incidents"])
         self.top_users_table = DataTable(["Username", "Attempts"])
+        self.top_ips_table.setMinimumHeight(200)
+        self.top_users_table.setMinimumHeight(200)
         row.addWidget(self._panel("Top Attacking IPs", self.top_ips_table), 1)
         row.addWidget(self._panel("Top Targeted Users", self.top_users_table), 1)
         layout.addLayout(row)
+
         self.severity_table = DataTable(["Severity", "Count"])
         self.severity_chart = Sparkline(AMBER, fill=False, bar=True, height=210)
+        self.severity_table.setMinimumHeight(200)
         lower = QHBoxLayout()
         lower.addWidget(self._panel("Severity Distribution", self.severity_table), 1)
         lower.addWidget(self._panel("Incident Volume", self.severity_chart), 1)
-        layout.addLayout(lower, 1)
+        layout.addLayout(lower)
+
+        scroll.setWidget(container)
+        page_layout.addWidget(scroll)
         self.stack.addWidget(page)
 
     def _build_blocks(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("TransparentScroll")
+
+        container = QWidget()
+        container.setObjectName("ScrollContainer")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(14)
+
         self.dry_run_label = QLabel("")
         self.dry_run_label.setObjectName("WarningText")
         layout.addWidget(self.dry_run_label)
+
         self.block_table = DataTable(["IP", "Severity", "Blocked At", "Expiry", "Reason"])
-        layout.addWidget(self._panel("Block Manager", self.block_table), 1)
+        self.block_table.setMinimumHeight(250)
+        layout.addWidget(self._panel("Block Manager", self.block_table))
+
         self.whitelist_text = QTextEdit()
         self.whitelist_text.setReadOnly(True)
-        self.whitelist_text.setMaximumHeight(140)
+        self.whitelist_text.setMinimumHeight(140)
         layout.addWidget(self._panel("IP Whitelist", self.whitelist_text))
+
+        scroll.setWidget(container)
+        page_layout.addWidget(scroll)
         self.stack.addWidget(page)
 
     def _settings_row(self, layout, label_text, widget, row, hint=None):
@@ -842,7 +1039,7 @@ class Dashboard(QMainWindow):
         return field
 
     def _spin_input(self, value, minimum=1, maximum=86400):
-        field = QSpinBox()
+        field = NoWheelSpinBox()
         field.setRange(minimum, maximum)
         field.setValue(int(value))
         return field
@@ -857,6 +1054,7 @@ class Dashboard(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setObjectName("TransparentScroll")
         container = QWidget()
+        container.setObjectName("ScrollContainer")
         layout = QVBoxLayout(container)
         layout.setSpacing(14)
 
@@ -1034,8 +1232,25 @@ class Dashboard(QMainWindow):
             self.settings_status.setText("Settings not saved.")
             QMessageBox.warning(self, "Save Failed", str(exc))
 
-    def refresh(self):
+    def refresh_telemetry(self):
         self.clock.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        self.cpu_ring.set_value(cpu)
+        self.ram_ring.set_value(mem.percent)
+
+        self.local_cpu_history.append(cpu)
+        self.local_ram_history.append(mem.percent)
+
+        if len(self.local_cpu_history) > 120:
+            self.local_cpu_history = self.local_cpu_history[-120:]
+        if len(self.local_ram_history) > 120:
+            self.local_ram_history = self.local_ram_history[-120:]
+
+        self.cpu_chart.set_values(self.local_cpu_history)
+        self.ram_chart.set_values(self.local_ram_history)
+
+    def refresh(self):
         incidents = load_incidents()
         metrics = load_metrics()
         scores = load_scores()
@@ -1062,14 +1277,13 @@ class Dashboard(QMainWindow):
         self.incident_card.set_data(len(incidents), "Recorded detections")
         self.block_card.set_data(len(blocks), "Blocklist rows")
         self.model_card.set_data("Ready" if meta else "Warmup", "Metadata present" if meta else "No model metadata")
-        self.cpu_ring.set_value(cpu)
-        self.ram_ring.set_value(mem.percent)
 
-        if not metrics.empty:
+        # Seed local history from metrics on startup if empty
+        if not self.local_cpu_history and not metrics.empty:
             if "cpu_percent" in metrics:
-                self.cpu_chart.set_values(metrics["cpu_percent"].tolist())
+                self.local_cpu_history = metrics["cpu_percent"].tolist()
             if "ram_percent" in metrics:
-                self.ram_chart.set_values(metrics["ram_percent"].tolist())
+                self.local_ram_history = metrics["ram_percent"].tolist()
 
         try:
             snapshot = get_full_system_snapshot()
@@ -1321,7 +1535,7 @@ QTextEdit {{
     border-radius: 8px;
     padding: 10px;
 }}
-QScrollArea#TransparentScroll {{
+QScrollArea#TransparentScroll, QScrollArea#TransparentScroll > QWidget, QWidget#ScrollContainer {{
     background: transparent;
     border: 0;
 }}

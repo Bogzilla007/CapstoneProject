@@ -407,11 +407,10 @@ def ml_inference_thread():
                             print(f"[ML INFERENCE] Cooldown active ({seconds_since_last:.0f}s/{ML_ANOMALY_COOLDOWN_SECONDS}s) — score logged only.")
                         elif _ml_anomaly_consecutive < ML_ANOMALY_CONSECUTIVE_REQUIRED:
                             print("[ML INFERENCE] Waiting for sustained anomaly before opening an incident.")
-                        elif ratio >= ML_DRIFT_RATIO_GUARD and recent_failed_logins == 0:
+                        elif recent_failed_logins == 0:
                             print(
-                                f"[ML INFERENCE] Model drift guard active: score is {ratio:.1f}x threshold "
-                                "with zero recent auth failures. Score logged, incident suppressed. "
-                                "Retrain the baseline model if this persists."
+                                f"[ML INFERENCE] Resource anomaly suppressed (score={score:.6f}, ratio={ratio:.1f}x) "
+                                "because recent failed logins count is zero. Suppressing false alarm."
                             )
                         else:
                             _last_ml_anomaly_trigger = now
