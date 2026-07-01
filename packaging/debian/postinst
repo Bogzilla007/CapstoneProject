@@ -4,6 +4,10 @@ set -e
 mkdir -p /var/lib/project-aegis/reports /var/lib/project-aegis/ml_data/model
 chmod 755 /var/lib/project-aegis /var/lib/project-aegis/reports /var/lib/project-aegis/ml_data /var/lib/project-aegis/ml_data/model
 
+if [ -f /etc/project-aegis/config.py ]; then
+  chmod 0644 /etc/project-aegis/config.py
+fi
+
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true

@@ -853,7 +853,7 @@ class UpdateWorker(QThread):
     check_finished = Signal(str, str) # status_msg, new_version (empty if no update or error)
     update_finished = Signal(bool, str) # success, msg
 
-    def __init__(self, check_only=True, current_version="0.1.3"):
+    def __init__(self, check_only=True, current_version="0.1.4"):
         super().__init__()
         self.check_only = check_only
         self.current_version = current_version
