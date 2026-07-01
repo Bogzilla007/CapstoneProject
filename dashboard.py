@@ -59,7 +59,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
-DASHBOARD_VERSION = "0.1.8"
+DASHBOARD_VERSION = "0.1.9"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -224,7 +224,11 @@ def clear_all_incidents():
     txt_path = runtime_paths.as_str(runtime_paths.INCIDENTS_TEXT)
     for p in (csv_path, txt_path):
         if os.path.exists(p):
-            os.remove(p)
+            try:
+                os.remove(p)
+            except PermissionError:
+                if os.name == "posix":
+                    subprocess.run(["pkexec", "rm", "-f", p], check=False)
 
 
 def dismiss_incident(row_index):
@@ -237,7 +241,18 @@ def dismiss_incident(row_index):
         if row_index < 0 or row_index >= len(df):
             return
         df = df.drop(df.index[row_index]).reset_index(drop=True)
-        df.to_csv(csv_path, index=False)
+        
+        try:
+            df.to_csv(csv_path, index=False)
+        except PermissionError:
+            if os.name == "posix":
+                fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    df.to_csv(f, index=False)
+                subprocess.run(["pkexec", "sh", "-c", f"cp {tmp_path} {csv_path} && chmod 0644 {csv_path} && rm -f {tmp_path}"], check=False)
+                if os.path.exists(tmp_path):
+                    try: os.unlink(tmp_path)
+                    except Exception: pass
     except Exception:
         pass
 
@@ -1608,8 +1623,14 @@ class Dashboard(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            clear_all_incidents()
-            self.refresh()
+            second_reply = QMessageBox.warning(
+                self, "Final Warning",
+                "Are you absolutely certain you want to clear ALL incident logs? This action cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if second_reply == QMessageBox.Yes:
+                clear_all_incidents()
+                self.refresh()
 
     def _refresh_ml(self, scores, meta):
         threshold = meta.get("threshold", "N/A")
