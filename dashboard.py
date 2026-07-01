@@ -853,7 +853,7 @@ class UpdateWorker(QThread):
     check_finished = Signal(str, str) # status_msg, new_version (empty if no update or error)
     update_finished = Signal(bool, str) # success, msg
 
-    def __init__(self, check_only=True, current_version="0.1.4"):
+    def __init__(self, check_only=True, current_version="0.1.5"):
         super().__init__()
         self.check_only = check_only
         self.current_version = current_version
@@ -914,7 +914,7 @@ class UpdateWorker(QThread):
                         "(git clone -b app-version https://github.com/Bogzilla007/CapstoneProject.git /tmp/aegis-update || "
                         "git clone https://github.com/Bogzilla007/CapstoneProject.git /tmp/aegis-update) && "
                         "cd /tmp/aegis-update && "
-                        "./build_deb.sh && "
+                        "bash build_deb.sh && "
                         "pkexec dpkg -i dist/project-aegis_*.deb"
                     )
                     res = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=120)
