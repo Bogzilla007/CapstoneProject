@@ -141,11 +141,6 @@ def _config_snapshot():
 
 
 def _write_config_file(data):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if CONFIG_PATH.exists():
-        backup = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + f".{datetime.now().strftime('%Y%m%d%H%M%S')}.bak")
-        shutil.copy2(CONFIG_PATH, backup)
-
     keys = [
         "BASE_DIR", "GROQ_API_KEY", "GROQ_MODEL", "AUTH_LOG_PATH",
         "FAILED_LOGIN_THRESHOLD", "TIME_WINDOW_SECONDS", "TELEMETRY_INTERVAL",
@@ -161,16 +156,50 @@ def _write_config_file(data):
     ]
     lines.extend(f"{key} = {_serialize_config_value(data[key])}" for key in keys)
 
-    fd, tmp_path = tempfile.mkstemp(prefix="config.", suffix=".py", dir=str(CONFIG_PATH.parent))
+    # Write first to a user-writable temporary file in system temp directory
+    fd, tmp_path = tempfile.mkstemp(prefix="aegis-config.", suffix=".py")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
-        os.replace(tmp_path, CONFIG_PATH)
-        if os.name == "posix":
-            os.chmod(CONFIG_PATH, 0o600)
+        
+        # Attempt to write/copy configuration directly (e.g. if we have write permission)
+        try:
+            if CONFIG_PATH.exists():
+                backup = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + f".{datetime.now().strftime('%Y%m%d%H%M%S')}.bak")
+                shutil.copy2(CONFIG_PATH, backup)
+            else:
+                CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            
+            shutil.copy2(tmp_path, CONFIG_PATH)
+            if os.name == "posix":
+                os.chmod(CONFIG_PATH, 0o600)
+        except PermissionError as orig_exc:
+            # Fallback to privilege escalation on POSIX systems if direct write is denied
+            if os.name == "posix":
+                backup_cmd = ""
+                if CONFIG_PATH.exists():
+                    backup = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + f".{datetime.now().strftime('%Y%m%d%H%M%S')}.bak")
+                    backup_cmd = f"cp {CONFIG_PATH} {backup} && "
+                
+                cmd = [
+                    "pkexec", "sh", "-c",
+                    f"mkdir -p {CONFIG_PATH.parent} && {backup_cmd}cp {tmp_path} {CONFIG_PATH} && chmod 0600 {CONFIG_PATH}"
+                ]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise PermissionError(f"Privilege escalation failed (code {result.returncode}): {result.stderr.strip()}")
+                except FileNotFoundError:
+                    # pkexec is not available, raise the original permission error
+                    raise orig_exc
+            else:
+                raise
     finally:
         if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 def _csv(path, n=None):
     if not os.path.exists(path):
