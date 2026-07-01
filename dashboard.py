@@ -860,27 +860,41 @@ class UpdateWorker(QThread):
 
     def run(self):
         if self.check_only:
-            try:
-                import urllib.request
-                import re
-                url = "https://raw.githubusercontent.com/Bogzilla007/CapstoneProject/main/build_deb.sh"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=8) as response:
-                    content = response.read().decode('utf-8')
-                match = re.search(r'VERSION="\$\{VERSION:-([^"]+)\}"', content)
-                if not match:
-                    match = re.search(r'VERSION=.*?([\d\.]+)', content)
-                
-                if match:
-                    remote_ver = match.group(1).strip()
-                    if remote_ver != self.current_version:
-                        self.check_finished.emit(f"Update available: v{remote_ver}", remote_ver)
+            urls = [
+                "https://raw.githubusercontent.com/Bogzilla007/CapstoneProject/app-version/build_deb.sh",
+                "https://raw.githubusercontent.com/Bogzilla007/CapstoneProject/main/build_deb.sh"
+            ]
+            content = None
+            last_err = ""
+            for url in urls:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=6) as response:
+                        content = response.read().decode('utf-8')
+                        break
+                except Exception as e:
+                    last_err = str(e)
+            
+            if content:
+                try:
+                    import re
+                    match = re.search(r'VERSION="\$\{VERSION:-([^"]+)\}"', content)
+                    if not match:
+                        match = re.search(r'VERSION=.*?([\d\.]+)', content)
+                    
+                    if match:
+                        remote_ver = match.group(1).strip()
+                        if remote_ver != self.current_version:
+                            self.check_finished.emit(f"Update available: v{remote_ver}", remote_ver)
+                        else:
+                            self.check_finished.emit("Up to date", "")
                     else:
-                        self.check_finished.emit("Up to date", "")
-                else:
-                    self.check_finished.emit("Unable to parse remote version", "")
-            except Exception as e:
-                self.check_finished.emit(f"Update check failed", "")
+                        self.check_finished.emit("Unable to parse version", "")
+                except Exception as e:
+                    self.check_finished.emit(f"Parse error: {str(e)}", "")
+            else:
+                self.check_finished.emit(f"Update check failed: {last_err}", "")
         else:
             try:
                 project_root = Path(__file__).resolve().parent
@@ -897,7 +911,8 @@ class UpdateWorker(QThread):
                     # We will clone repo to /tmp, build package and install it via pkexec.
                     cmd = (
                         "rm -rf /tmp/aegis-update && "
-                        "git clone https://github.com/Bogzilla007/CapstoneProject.git /tmp/aegis-update && "
+                        "(git clone -b app-version https://github.com/Bogzilla007/CapstoneProject.git /tmp/aegis-update || "
+                        "git clone https://github.com/Bogzilla007/CapstoneProject.git /tmp/aegis-update) && "
                         "cd /tmp/aegis-update && "
                         "./build_deb.sh && "
                         "pkexec dpkg -i dist/project-aegis_*.deb"
