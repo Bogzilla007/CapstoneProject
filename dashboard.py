@@ -59,6 +59,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
+DASHBOARD_VERSION = "0.1.7"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -853,7 +854,7 @@ class UpdateWorker(QThread):
     check_finished = Signal(str, str) # status_msg, new_version (empty if no update or error)
     update_finished = Signal(bool, str) # success, msg
 
-    def __init__(self, check_only=True, current_version="0.1.6"):
+    def __init__(self, check_only=True, current_version=DASHBOARD_VERSION):
         super().__init__()
         self.check_only = check_only
         self.current_version = current_version
@@ -967,7 +968,7 @@ class Dashboard(QMainWindow):
         update_layout.setContentsMargins(6, 6, 6, 6)
         update_layout.setSpacing(6)
 
-        self.version_label = QLabel("Version: v0.1.3")
+        self.version_label = QLabel(f"Version: v{DASHBOARD_VERSION}")
         self.version_label.setStyleSheet("color: #7fa093; font-size: 11px; font-weight: bold;")
         self.update_status = QLabel("Checking updates...")
         self.update_status.setStyleSheet("color: #e4fff3; font-size: 11px;")
@@ -1480,7 +1481,7 @@ class Dashboard(QMainWindow):
             QMessageBox.warning(self, "Save Failed", str(exc))
 
     def _check_for_updates(self):
-        self.update_worker = UpdateWorker(check_only=True, current_version="0.1.3")
+        self.update_worker = UpdateWorker(check_only=True, current_version=DASHBOARD_VERSION)
         self.update_worker.check_finished.connect(self._on_check_finished)
         self.update_worker.start()
 
@@ -1493,7 +1494,7 @@ class Dashboard(QMainWindow):
     def _run_update(self):
         self.update_btn.setEnabled(False)
         self.update_status.setText("Updating... Please authorize if prompted.")
-        self.update_worker = UpdateWorker(check_only=False, current_version="0.1.3")
+        self.update_worker = UpdateWorker(check_only=False, current_version=DASHBOARD_VERSION)
         self.update_worker.update_finished.connect(self._on_update_finished)
         self.update_worker.start()
 
