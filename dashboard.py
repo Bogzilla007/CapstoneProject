@@ -188,6 +188,30 @@ def load_incidents():
     return _csv(runtime_paths.as_str(runtime_paths.INCIDENTS_CSV))
 
 
+def clear_all_incidents():
+    """Remove all incident records from both CSV and TXT report files."""
+    csv_path = runtime_paths.as_str(runtime_paths.INCIDENTS_CSV)
+    txt_path = runtime_paths.as_str(runtime_paths.INCIDENTS_TEXT)
+    for p in (csv_path, txt_path):
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def dismiss_incident(row_index):
+    """Remove a single incident row (by original CSV row index) from the CSV."""
+    csv_path = runtime_paths.as_str(runtime_paths.INCIDENTS_CSV)
+    if not os.path.exists(csv_path):
+        return
+    try:
+        df = pd.read_csv(csv_path)
+        if row_index < 0 or row_index >= len(df):
+            return
+        df = df.drop(df.index[row_index]).reset_index(drop=True)
+        df.to_csv(csv_path, index=False)
+    except Exception:
+        pass
+
+
 def load_metrics(n=120):
     return _csv(runtime_paths.as_str(runtime_paths.SYSTEM_METRICS_CSV), n)
 
@@ -687,9 +711,13 @@ class NavButton(QLabel):
 
 
 class IncidentCard(QFrame):
-    def __init__(self, row):
+    """A single incident card with a dismiss (×) button."""
+    dismissed = None  # will be set to a callback by the Dashboard
+
+    def __init__(self, row, csv_row_index=-1):
         super().__init__()
         self.setObjectName("IncidentCard")
+        self.csv_row_index = csv_row_index
         severity = str(row.get("severity", "UNKNOWN")).upper()
         color = severity_color(severity)
         layout = QVBoxLayout(self)
@@ -711,6 +739,16 @@ class IncidentCard(QFrame):
         time_label = QLabel(str(ts))
         time_label.setObjectName("Muted")
         top.addWidget(time_label)
+
+        dismiss_btn = QPushButton("×")
+        dismiss_btn.setFixedSize(28, 28)
+        dismiss_btn.setToolTip("Dismiss this incident")
+        dismiss_btn.setStyleSheet(
+            "QPushButton { color: #ff6b6b; background: rgba(255,80,80,0.08); border: 1px solid rgba(255,80,80,0.3); border-radius: 14px; font-size: 16px; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(255,80,80,0.25); }"
+        )
+        dismiss_btn.clicked.connect(self._on_dismiss)
+        top.addWidget(dismiss_btn)
         layout.addLayout(top)
 
         det = QLabel(f"{row.get('detection_label', 'UNKNOWN')}  |  {row.get('action', 'N/A')}")
@@ -721,6 +759,13 @@ class IncidentCard(QFrame):
         summary.setObjectName("IncidentSummary")
         layout.addWidget(summary)
         self.setMinimumHeight(112)
+
+    def _on_dismiss(self):
+        if self.csv_row_index >= 0:
+            dismiss_incident(self.csv_row_index)
+        if self.dismissed:
+            self.dismissed()
+        self.deleteLater()
 
 
 class BrandWidget(QWidget):
@@ -950,6 +995,14 @@ class Dashboard(QMainWindow):
         self.incident_feed_title.setObjectName("SectionTitle")
         header.addWidget(self.incident_feed_title)
         header.addStretch()
+        clear_btn = QPushButton("Clear All Incidents")
+        clear_btn.setFixedHeight(32)
+        clear_btn.setStyleSheet(
+            "QPushButton { color: #ff6b6b; background: rgba(255,80,80,0.10); border: 1px solid rgba(255,80,80,0.4); border-radius: 6px; padding: 4px 16px; font-size: 12px; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(255,80,80,0.30); }"
+        )
+        clear_btn.clicked.connect(self._clear_all_incidents)
+        header.addWidget(clear_btn)
         layout.addLayout(header)
         self.incident_scroll = QScrollArea()
         self.incident_scroll.setWidgetResizable(True)
@@ -1366,9 +1419,21 @@ class Dashboard(QMainWindow):
             self.incident_list.addStretch()
             return
         data = incidents.sort_values("timestamp", ascending=False) if "timestamp" in incidents else incidents
-        for _, row in data.head(30).iterrows():
-            self.incident_list.addWidget(IncidentCard(row))
+        for original_idx, row in data.head(30).iterrows():
+            card = IncidentCard(row, csv_row_index=original_idx)
+            card.dismissed = self.refresh
+            self.incident_list.addWidget(card)
         self.incident_list.addStretch()
+
+    def _clear_all_incidents(self):
+        reply = QMessageBox.question(
+            self, "Clear All Incidents",
+            "This will permanently delete all recorded incidents.\nAre you sure?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            clear_all_incidents()
+            self.refresh()
 
     def _refresh_ml(self, scores, meta):
         threshold = meta.get("threshold", "N/A")
