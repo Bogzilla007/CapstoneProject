@@ -172,7 +172,7 @@ def _write_config_file(data):
             
             shutil.copy2(tmp_path, CONFIG_PATH)
             if os.name == "posix":
-                os.chmod(CONFIG_PATH, 0o600)
+                os.chmod(CONFIG_PATH, 0o644)
         except PermissionError as orig_exc:
             # Fallback to privilege escalation on POSIX systems if direct write is denied
             if os.name == "posix":
@@ -183,7 +183,7 @@ def _write_config_file(data):
                 
                 cmd = [
                     "pkexec", "sh", "-c",
-                    f"mkdir -p {CONFIG_PATH.parent} && {backup_cmd}cp {tmp_path} {CONFIG_PATH} && chmod 0600 {CONFIG_PATH}"
+                    f"mkdir -p {CONFIG_PATH.parent} && {backup_cmd}cp {tmp_path} {CONFIG_PATH} && chmod 0644 {CONFIG_PATH}"
                 ]
                 try:
                     result = subprocess.run(cmd, capture_output=True, text=True)
