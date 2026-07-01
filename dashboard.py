@@ -30,7 +30,7 @@ import runtime_paths
 from system_checks import get_full_system_snapshot
 
 try:
-    from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+    from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal, QThread
     from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
@@ -849,6 +849,69 @@ class BrandWidget(QWidget):
             )
 
 
+class UpdateWorker(QThread):
+    check_finished = Signal(str, str) # status_msg, new_version (empty if no update or error)
+    update_finished = Signal(bool, str) # success, msg
+
+    def __init__(self, check_only=True, current_version="0.1.3"):
+        super().__init__()
+        self.check_only = check_only
+        self.current_version = current_version
+
+    def run(self):
+        if self.check_only:
+            try:
+                import urllib.request
+                import re
+                url = "https://raw.githubusercontent.com/Bogzilla007/CapstoneProject/main/build_deb.sh"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=8) as response:
+                    content = response.read().decode('utf-8')
+                match = re.search(r'VERSION="\$\{VERSION:-([^"]+)\}"', content)
+                if not match:
+                    match = re.search(r'VERSION=.*?([\d\.]+)', content)
+                
+                if match:
+                    remote_ver = match.group(1).strip()
+                    if remote_ver != self.current_version:
+                        self.check_finished.emit(f"Update available: v{remote_ver}", remote_ver)
+                    else:
+                        self.check_finished.emit("Up to date", "")
+                else:
+                    self.check_finished.emit("Unable to parse remote version", "")
+            except Exception as e:
+                self.check_finished.emit(f"Update check failed", "")
+        else:
+            try:
+                project_root = Path(__file__).resolve().parent
+                is_git = (project_root / ".git").exists()
+                if is_git:
+                    # Run git pull
+                    res = subprocess.run(["git", "pull"], capture_output=True, text=True, cwd=str(project_root), timeout=30)
+                    if res.returncode == 0:
+                        self.update_finished.emit(True, "Successfully updated repo! Please restart.")
+                    else:
+                        self.update_finished.emit(False, f"Git pull failed: {res.stderr.strip()}")
+                else:
+                    # Packaged version update.
+                    # We will clone repo to /tmp, build package and install it via pkexec.
+                    cmd = (
+                        "rm -rf /tmp/aegis-update && "
+                        "git clone https://github.com/Bogzilla007/CapstoneProject.git /tmp/aegis-update && "
+                        "cd /tmp/aegis-update && "
+                        "./build_deb.sh && "
+                        "pkexec dpkg -i dist/project-aegis_*.deb"
+                    )
+                    res = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=120)
+                    if res.returncode == 0:
+                        self.update_finished.emit(True, "Successfully installed update! Please restart.")
+                    else:
+                        err = res.stderr.strip() or res.stdout.strip()
+                        self.update_finished.emit(False, f"Update failed: {err}")
+            except Exception as e:
+                self.update_finished.emit(False, f"Update error: {str(e)}")
+
+
 class Dashboard(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -878,10 +941,45 @@ class Dashboard(QMainWindow):
             self.nav_buttons.append(button)
             self.nav.outer.addWidget(button)
         self.nav.outer.addStretch()
+
+        # Update Checker Panel in Left Sidebar
+        self.update_panel = QFrame()
+        self.update_panel.setObjectName("UpdatePanel")
+        self.update_panel.setStyleSheet(
+            "QFrame#UpdatePanel { background: rgba(11, 21, 18, 150); border: 1px solid rgba(28, 68, 56, 120); border-radius: 8px; margin: 4px; padding: 10px; }"
+        )
+        update_layout = QVBoxLayout(self.update_panel)
+        update_layout.setContentsMargins(6, 6, 6, 6)
+        update_layout.setSpacing(6)
+
+        self.version_label = QLabel("Version: v0.1.3")
+        self.version_label.setStyleSheet("color: #7fa093; font-size: 11px; font-weight: bold;")
+        self.update_status = QLabel("Checking updates...")
+        self.update_status.setStyleSheet("color: #e4fff3; font-size: 11px;")
+        self.update_status.setWordWrap(True)
+
+        self.update_btn = QPushButton("Update Now")
+        self.update_btn.setObjectName("UpdateBtn")
+        self.update_btn.setCursor(Qt.PointingHandCursor)
+        self.update_btn.setStyleSheet(
+            "QPushButton#UpdateBtn { padding: 5px 10px; font-size: 10px; font-weight: bold; background: rgba(38, 240, 165, 34); border-color: rgba(38, 240, 165, 90); }"
+            "QPushButton#UpdateBtn:hover { background: rgba(38, 240, 165, 60); }"
+        )
+        self.update_btn.setVisible(False)
+        self.update_btn.clicked.connect(self._run_update)
+
+        update_layout.addWidget(self.version_label)
+        update_layout.addWidget(self.update_status)
+        update_layout.addWidget(self.update_btn)
+        self.nav.outer.addWidget(self.update_panel)
+
         self.daemon_pill = QLabel("Daemon: unknown")
         self.daemon_pill.setObjectName("DaemonPill")
         self.nav.outer.addWidget(self.daemon_pill)
         shell.addWidget(self.nav)
+
+        # Trigger update check
+        self._check_for_updates()
 
         self.content_frame = QWidget()
         self.content_frame.setObjectName("ContentFrame")
@@ -1365,6 +1463,33 @@ class Dashboard(QMainWindow):
         except Exception as exc:
             self.settings_status.setText("Settings not saved.")
             QMessageBox.warning(self, "Save Failed", str(exc))
+
+    def _check_for_updates(self):
+        self.update_worker = UpdateWorker(check_only=True, current_version="0.1.3")
+        self.update_worker.check_finished.connect(self._on_check_finished)
+        self.update_worker.start()
+
+    def _on_check_finished(self, status, new_version):
+        self.update_status.setText(status)
+        if new_version:
+            self.update_btn.setVisible(True)
+            self.update_btn.setText(f"Update to v{new_version}")
+
+    def _run_update(self):
+        self.update_btn.setEnabled(False)
+        self.update_status.setText("Updating... Please authorize if prompted.")
+        self.update_worker = UpdateWorker(check_only=False, current_version="0.1.3")
+        self.update_worker.update_finished.connect(self._on_update_finished)
+        self.update_worker.start()
+
+    def _on_update_finished(self, success, msg):
+        self.update_btn.setEnabled(True)
+        self.update_status.setText(msg)
+        if success:
+            self.update_btn.setVisible(False)
+            QMessageBox.information(self, "Update Successful", msg)
+        else:
+            QMessageBox.warning(self, "Update Failed", msg)
 
     def refresh_telemetry(self):
         self.clock.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
