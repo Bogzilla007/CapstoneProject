@@ -74,7 +74,7 @@ Tkinter is fine for small utility windows, but it is not ideal for the kind of p
 - SSH server enabled so `/var/log/auth.log` receives SSH auth events
 - UFW installed for firewall mitigation
 
-## Quick Start On Kali
+### Quick Start On Kali
 
 Clone the repository:
 
@@ -83,9 +83,13 @@ git clone https://github.com/Bogzilla007/CapstoneProject.git
 cd CapstoneProject
 ```
 
-## Build A Debian Package
+There are two ways to install Project Aegis: as a `.deb` package (recommended) or manually.
 
-Project Aegis can also be installed as a normal `.deb` package. Build it on a Debian/Kali/Linux system:
+---
+
+### Option A: Install As A Debian Package (Recommended)
+
+Install build tools and build the package:
 
 ```bash
 sudo apt update
@@ -101,7 +105,19 @@ sudo apt install ./dist/project-aegis_0.1.2_all.deb
 
 The package installs the app under `/opt/project-aegis`, configuration under `/etc/project-aegis/config.py`, runtime data under `/var/lib/project-aegis`, launchers under `/usr/bin`, and the `aegis-daemon` systemd service. See `PACKAGING.md` for the full package workflow.
 
-Install Linux packages:
+You still need to install the Python dependencies and system services. Continue from the **Install Dependencies** section below.
+
+---
+
+### Option B: Manual Install (No Package)
+
+If you prefer not to use the `.deb` package, you can run Project Aegis directly from the cloned repository. Continue from the **Install Dependencies** section below, then use the manual install scripts for the daemon and desktop app.
+
+---
+
+## Install Dependencies
+
+Install required Linux packages:
 
 ```bash
 sudo apt update
@@ -130,6 +146,8 @@ sudo systemctl start ssh rsyslog
 sudo ufw enable
 ```
 
+## Configure
+
 Create local config:
 
 ```bash
@@ -148,6 +166,8 @@ IP_WHITELIST = ["127.0.0.1", "::1", "YOUR_ADMIN_IP"]
 ```
 
 `config.py` is gitignored. Do not commit API keys.
+
+If you installed via the `.deb` package, edit the config at `/etc/project-aegis/config.py` instead.
 
 ## Train The Initial ML Model
 
@@ -221,15 +241,40 @@ python3 dashboard.py
 
 This opens a native desktop window. No Streamlit server and no browser are used.
 
+## Updating
+
+To update Project Aegis to a new version:
+
+```bash
+cd CapstoneProject
+git pull
+```
+
+If you installed via the `.deb` package, rebuild and reinstall:
+
+```bash
+bash build_deb.sh
+sudo apt install ./dist/project-aegis_0.1.2_all.deb
+```
+
+Then restart the daemon to pick up changes:
+
+```bash
+sudo systemctl restart aegis-daemon
+```
+
+The dashboard will pick up changes the next time it is launched.
+
 ## Desktop Dashboard Tabs
 
 | Tab | Purpose |
 |---|---|
-| Overview | Live CPU/RAM, host status, open ports, active users, incident/block totals |
-| Incidents | Recent incident table with severity, action, IP, detection label, and summary |
+| Overview | Live CPU/RAM gauges, host status, open ports, active users, incident/block totals |
+| Incidents | Recent incident feed with severity badges, dismiss individual incidents or clear all |
 | ML Status | Model metadata, phase estimate, threshold, clean rows, anomaly score chart |
 | Timeline | Top attacking IPs, targeted usernames, and severity distribution |
 | Block Manager | Blocklist, expiry status, dry-run warning, whitelist view |
+| Settings | Edit daemon configuration, API keys, thresholds, and whitelist from the GUI |
 
 ## Test The System
 
