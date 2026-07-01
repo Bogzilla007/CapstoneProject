@@ -59,7 +59,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
-DASHBOARD_VERSION = "0.1.7"
+DASHBOARD_VERSION = "0.1.8"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -886,7 +886,13 @@ class UpdateWorker(QThread):
                     
                     if match:
                         remote_ver = match.group(1).strip()
-                        if remote_ver != self.current_version:
+                        def parse_ver(v):
+                            return tuple(int(x) for x in v.split('.') if x.isdigit())
+                        
+                        r_tup = parse_ver(remote_ver)
+                        c_tup = parse_ver(self.current_version)
+
+                        if r_tup > c_tup:
                             self.check_finished.emit(f"Update available: v{remote_ver}", remote_ver)
                         else:
                             self.check_finished.emit("Up to date", "")
