@@ -113,18 +113,73 @@ def block_ip(ip, severity="HIGH"):
         return False
 
 def unblock_ip(ip):
-    """Removes ufw rule for an expired block."""
+    """Removes ufw rule for an expired block. Returns True on success, False on failure."""
     if config.DRY_RUN:
         print(f"  [DRY RUN] Would execute: sudo ufw delete deny from {ip}")
-        return
+        return True
+    
+    cmd = ["sudo", "ufw", "delete", "deny", "from", ip]
+    # Check if running as non-root and pkexec is available for GUI escalation
+    if os.name == "posix" and os.getuid() != 0:
+        import shutil
+        if shutil.which("pkexec"):
+            cmd = ["pkexec", "ufw", "delete", "deny", "from", ip]
+            
     try:
-        subprocess.run(
-            ["sudo", "ufw", "delete", "deny", "from", ip],
+        result = subprocess.run(
+            cmd,
             capture_output=True, text=True, timeout=10
         )
-        print(f"  [+] Unblocked {ip} (block expired)")
+        if result.returncode == 0:
+            print(f"  [+] Unblocked {ip}")
+            return True
+        else:
+            print(f"  [!] Unblock failed for {ip}: {result.stderr.strip()}")
+            return False
     except Exception as e:
         print(f"  [!] Unblock error for {ip}: {e}")
+        return False
+
+def remove_from_blocklist(ip):
+    """Removes an IP entry from the blocklist file, handling permission issues using pkexec if needed."""
+    if not os.path.exists(BLOCKLIST_PATH):
+        return True
+    try:
+        lines = []
+        with open(BLOCKLIST_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line_strip = line.strip()
+                if not line_strip:
+                    continue
+                parts = line_strip.split(",")
+                if parts[0] == ip:
+                    continue
+                lines.append(line)
+        
+        try:
+            with open(BLOCKLIST_PATH, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return True
+        except PermissionError:
+            if os.name == "posix":
+                import tempfile
+                fd, tmp_path = tempfile.mkstemp(suffix=".txt")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    cmd = ["pkexec", "sh", "-c", f"cp {tmp_path} {BLOCKLIST_PATH} && chmod 0644 {BLOCKLIST_PATH} && rm -f {tmp_path}"]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    return result.returncode == 0
+                finally:
+                    if os.path.exists(tmp_path):
+                        try: os.unlink(tmp_path)
+                        except Exception: pass
+            else:
+                raise
+    except Exception as e:
+        print(f"  [!] Failed to remove {ip} from blocklist file: {e}")
+        return False
+
 
 # ─── Discord Alerting ──────────────────────────────────────────────────────────
 

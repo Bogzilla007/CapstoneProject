@@ -28,6 +28,7 @@ import psutil
 import config
 import runtime_paths
 from system_checks import get_full_system_snapshot
+import mitigation
 
 try:
     from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal, QThread
@@ -35,6 +36,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QDialog,
         QFrame,
         QGridLayout,
         QHBoxLayout,
@@ -59,7 +61,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
-DASHBOARD_VERSION = "0.1.9"
+DASHBOARD_VERSION = "0.2.0"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -1277,7 +1279,27 @@ class Dashboard(QMainWindow):
 
         self.block_table = DataTable(["IP", "Severity", "Blocked At", "Expiry", "Reason"])
         self.block_table.setMinimumHeight(250)
-        layout.addWidget(self._panel("Block Manager", self.block_table))
+        
+        # Block Manager panel with table and unblock button
+        blocks_panel = GlassPanel("Block Manager")
+        blocks_panel.outer.addWidget(self.block_table)
+        
+        unblock_row = QHBoxLayout()
+        self.unblock_status = QLabel("")
+        self.unblock_status.setStyleSheet("color: #7fa093; font-size: 11px;")
+        
+        self.unblock_button = QPushButton("Unblock Selected IP")
+        self.unblock_button.setFixedHeight(32)
+        self.unblock_button.setStyleSheet(
+            "QPushButton { color: #ff6b6b; background: rgba(255,80,80,0.10); border: 1px solid rgba(255,80,80,0.4); border-radius: 6px; padding: 4px 16px; font-size: 12px; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(255,80,80,0.30); }"
+        )
+        self.unblock_button.clicked.connect(self._unblock_selected_ip)
+        
+        unblock_row.addWidget(self.unblock_status, 1)
+        unblock_row.addWidget(self.unblock_button)
+        blocks_panel.outer.addLayout(unblock_row)
+        layout.addWidget(blocks_panel)
 
         self.whitelist_text = QTextEdit()
         self.whitelist_text.setReadOnly(True)
@@ -1690,6 +1712,47 @@ class Dashboard(QMainWindow):
         self.block_table.set_rows(rows)
         whitelist = getattr(config, "IP_WHITELIST", [])
         self.whitelist_text.setPlainText("\n".join(str(ip) for ip in whitelist) or "No whitelist entries configured.")
+
+    def _unblock_selected_ip(self):
+        selected_ranges = self.block_table.selectedRanges()
+        if not selected_ranges:
+            QMessageBox.warning(self, "No IP Selected", "Please select a row in the Block Manager table.")
+            return
+        row = selected_ranges[0].topRow()
+        ip_item = self.block_table.item(row, 0)
+        if not ip_item:
+            return
+        ip = ip_item.text().strip()
+        
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Unblock", 
+            f"Are you sure you want to unblock IP: {ip}?\n\nThis will remove the UFW deny rule and require system authorization.",
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+            
+        self.unblock_status.setText(f"Unblocking {ip}... Please authorize if prompted.")
+        self.unblock_status.repaint()
+        QApplication.processEvents()
+        
+        success = mitigation.unblock_ip(ip)
+        if success:
+            file_success = mitigation.remove_from_blocklist(ip)
+            if file_success:
+                self.unblock_status.setText(f"Successfully unblocked {ip} and updated blocklist.")
+                QMessageBox.information(self, "IP Unblocked", f"Successfully unblocked {ip} from firewall and blocklist.")
+            else:
+                self.unblock_status.setText(f"Unblocked {ip} in firewall, but failed to update blocklist file.")
+                QMessageBox.warning(self, "IP Unblocked with Warning", f"Unblocked {ip} from firewall, but failed to remove from blocklist file.")
+        else:
+            self.unblock_status.setText(f"Failed to unblock {ip}.")
+            QMessageBox.critical(self, "Unblock Failed", f"Failed to unblock {ip}. User authorization may have failed or cancelled.")
+            
+        self.refresh()
+
 
 
 STYLE = f"""
