@@ -9,6 +9,12 @@ import os
 import numpy as np
 import joblib
 import tensorflow as tf
+try:
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.set_visible_devices([], 'GPU')
+except Exception:
+    pass
 from collections import deque
 from datetime import datetime
 import csv as _csv

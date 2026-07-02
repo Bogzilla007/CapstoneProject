@@ -12,6 +12,12 @@ from datetime import datetime
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF warnings
 import tensorflow as tf
+try:
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.set_visible_devices([], 'GPU')
+except Exception:
+    pass
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, LSTM, Dense, RepeatVector, TimeDistributed
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint

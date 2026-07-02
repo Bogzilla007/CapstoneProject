@@ -61,7 +61,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
-DASHBOARD_VERSION = "0.2.1"
+DASHBOARD_VERSION = "0.2.2"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -1073,7 +1073,7 @@ class Dashboard(QMainWindow):
 
         self.telemetry_timer = QTimer(self)
         self.telemetry_timer.timeout.connect(self.refresh_telemetry)
-        self.telemetry_timer.start(1000) # 1-second telemetry updates
+        self.telemetry_timer.start(3000) # 3-second telemetry updates
         
         self.refresh()
 

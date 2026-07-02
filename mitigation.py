@@ -10,6 +10,7 @@ import json
 import os
 import time
 from datetime import datetime
+import csv
 import config
 import runtime_paths
 
@@ -293,6 +294,75 @@ def send_discord_alert(ip, verdict, forensics):
     except Exception as e:
         print(f"  [!] Discord request error: {e}")
 
+# ─── Report Saving (Moved from daemon.py to prevent circular imports) ──────────
+
+def _ensure_parent_dir(path):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+def save_reports(forensics, verdict=None):
+    _ensure_parent_dir(config.CSV_REPORT_PATH)
+    _ensure_parent_dir(config.TEXT_REPORT_PATH)
+    csv_exists = os.path.exists(config.CSV_REPORT_PATH)
+    with open(config.CSV_REPORT_PATH, "a", newline="") as f:
+        fieldnames = ["timestamp", "attacker_ip", "failed_attempts",
+                      "country", "isp", "org", "severity", "action", "summary",
+                      "detection_label", "abuse_score", "timing_pattern",
+                      "usernames", "repeat_offender", "anomaly_score"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        if not csv_exists:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp":       forensics["timestamp"],
+            "attacker_ip":     forensics["attacker_ip"],
+            "failed_attempts": forensics["failed_attempts"],
+            "country":         forensics.get("geo", {}).get("country", "Unknown") if forensics.get("geo") else "Unknown",
+            "isp":             forensics.get("geo", {}).get("isp", "Unknown") if forensics.get("geo") else "Unknown",
+            "org":             forensics.get("geo", {}).get("org", "Unknown") if forensics.get("geo") else "Unknown",
+            "severity":        verdict.get("severity", "N/A") if verdict else "PENDING",
+            "action":          verdict.get("action", "N/A") if verdict else "PENDING",
+            "summary":         verdict.get("summary", "") if verdict else "",
+            "detection_label": forensics.get("detection_label", "BRUTE_FORCE"),
+            "abuse_score":     forensics.get("abuse_score", 0),
+            "timing_pattern":  forensics.get("timing_pattern", "INSUFFICIENT_DATA"),
+            "usernames":       "|".join(forensics.get("detected_usernames", [])) if isinstance(forensics.get("detected_usernames"), list) else forensics.get("usernames", ""),
+            "repeat_offender": forensics.get("repeat_offender", False),
+            "anomaly_score":   forensics.get("anomaly_score", ""),
+        })
+    with open(config.TEXT_REPORT_PATH, "a") as f:
+        f.write("=" * 70 + "\n")
+        f.write(f"INCIDENT REPORT - {forensics['timestamp']}\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"Attacker IP     : {forensics['attacker_ip']}\n")
+        f.write(f"Detection Label : {forensics.get('detection_label', 'BRUTE_FORCE')}\n")
+        f.write(f"Failed Attempts : {forensics['failed_attempts']}\n")
+        f.write(f"Country         : {forensics.get('geo', {}).get('country', 'Unknown') if forensics.get('geo') else 'Unknown'}\n")
+        f.write(f"ISP             : {forensics.get('geo', {}).get('isp', 'Unknown') if forensics.get('geo') else 'Unknown'}\n")
+        f.write(f"Org             : {forensics.get('geo', {}).get('org', 'Unknown') if forensics.get('geo') else 'Unknown'}\n")
+        if "anomaly_score" in forensics:
+            f.write(f"Anomaly Score   : {forensics['anomaly_score']}\n")
+            f.write(f"Anomaly Thresh  : {forensics.get('anomaly_threshold', '')}\n")
+            f.write(f"ML Phase        : {forensics.get('ml_phase', 'N/A')}\n")
+            f.write(f"Detection Desc  : {forensics.get('detection_description', '')}\n")
+        if verdict:
+            f.write(f"Severity        : {verdict.get('severity', 'N/A')}\n")
+            f.write(f"Action          : {verdict.get('action', 'N/A')}\n")
+            f.write(f"AI Summary      : {verdict.get('summary', '')}\n")
+        f.write("\nOpen Ports at Time of Attack:\n")
+        for p in forensics.get("open_ports", []):
+            f.write(f"  Port {p.get('port','?'):6} | {p.get('address','?')}\n")
+        f.write("\nActive Users at Time of Attack:\n")
+        for u in forensics.get("active_users", []):
+            f.write(f"  {u.get('user','?')} on {u.get('terminal','?')} from {u.get('source','?')}\n")
+        f.write("\nRunning Services at Time of Attack:\n")
+        for s in forensics.get("running_services", []):
+            f.write(f"  {s.get('name','?'):30} | {s.get('description','?')}\n")
+        f.write(f"\nProcess Snapshot:\n{forensics.get('process_snapshot', 'N/A')}\n")
+        f.write(f"\nRaw Log Sample:\n{forensics.get('raw_log_sample', 'N/A')}\n")
+        f.write("=" * 70 + "\n\n")
+    print(f"  [+] Reports saved to {config.CSV_REPORT_PATH} and {config.TEXT_REPORT_PATH}")
+
 # ─── Master Mitigation Handler ─────────────────────────────────────────────────
 
 def handle_verdict(ip, verdict, forensics):
@@ -300,6 +370,18 @@ def handle_verdict(ip, verdict, forensics):
     Master function called by the daemon.
     Checks whitelist, applies block with expiry, sends tiered Discord alert.
     """
+    # Save reports if this is a local resilience detection (LOG_TAMPER or UFW_INTEGRITY_VIOLATION)
+    if forensics.get("detection_label") in ("LOG_TAMPER", "UFW_INTEGRITY_VIOLATION"):
+        if "timestamp" not in forensics:
+            forensics["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if "attacker_ip" not in forensics:
+            forensics["attacker_ip"] = ip
+        if "failed_attempts" not in forensics:
+            forensics["failed_attempts"] = "N/A"
+        if "geo" not in forensics:
+            forensics["geo"] = {}
+        save_reports(forensics, verdict)
+
     action = verdict.get("action", "IGNORE")
     severity = verdict.get("severity", "LOW")
 

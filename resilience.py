@@ -110,7 +110,7 @@ def ufw_integrity_check_once():
             "geo": {},
             "threat_labels": ["UFW_INTEGRITY_VIOLATION"],
         }
-        mitigation.send_discord_alert(ip, verdict, forensics)
+        mitigation.handle_verdict(ip, verdict, forensics)
 
 
 def ufw_integrity_loop(stop_event=None, interval=60):

@@ -27,8 +27,8 @@ RE_SUCCESS = re.compile(
 
 # sudo failure
 RE_SUDO_FAIL = re.compile(
-    r"pam_unix\(sudo:auth\): authentication failure;.*?(?:ruser=(\S+)|user=(\S+))|"
-    r"sudo:\s*(\S+)\s*:\s*(?:\d+ incorrect password attempts?|auth failure|authentication failure)"
+    r"sudo(?:\[\d+\])?:.*?pam_unix\(\S+:auth\): authentication failure;.*?(?:ruser=(\S+)|user=(\S+))|"
+    r"sudo(?:\[\d+\])?:\s*(\S+)\s*:\s*(?:\d+ incorrect password attempts?|auth failure|authentication failure)"
 )
 
 # sudo success (privilege use)

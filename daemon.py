@@ -22,7 +22,7 @@ from collections import defaultdict
 
 import config
 from llm_analyst import analyze_threat
-from mitigation import handle_verdict
+from mitigation import handle_verdict, save_reports
 from system_checks import get_full_system_snapshot
 import collector
 import log_parser
@@ -100,13 +100,11 @@ def run_process_snapshot():
         return f"Process snapshot failed: {e}"
 
 def _is_real_ip(ip):
-    """Returns True if ip is a valid IPv4/IPv6 address. False for placeholder
-    labels like SYSTEM_ANOMALY used by non-network detections (e.g. ML
-    resource anomalies that have no real attacker IP)."""
+    """Returns True if ip is a valid public IPv4/IPv6 address. False for private/loopback/placeholder IPs."""
     import ipaddress
     try:
-        ipaddress.ip_address(ip)
-        return True
+        ip_obj = ipaddress.ip_address(ip)
+        return not ip_obj.is_private
     except ValueError:
         return False
 
@@ -145,73 +143,7 @@ def gather_forensics(ip, failed_count, raw_log_lines, extra_context=None):
         forensics.update(extra_context)
     return forensics
 
-def _ensure_parent_dir(path):
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
 
-
-def save_reports(forensics, verdict=None):
-    _ensure_parent_dir(config.CSV_REPORT_PATH)
-    _ensure_parent_dir(config.TEXT_REPORT_PATH)
-    csv_exists = os.path.exists(config.CSV_REPORT_PATH)
-    with open(config.CSV_REPORT_PATH, "a", newline="") as f:
-        fieldnames = ["timestamp", "attacker_ip", "failed_attempts",
-                      "country", "isp", "org", "severity", "action", "summary",
-                      "detection_label", "abuse_score", "timing_pattern",
-                      "usernames", "repeat_offender", "anomaly_score"]
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        if not csv_exists:
-            writer.writeheader()
-        writer.writerow({
-            "timestamp":       forensics["timestamp"],
-            "attacker_ip":     forensics["attacker_ip"],
-            "failed_attempts": forensics["failed_attempts"],
-            "country":         forensics["geo"].get("country", "Unknown"),
-            "isp":             forensics["geo"].get("isp", "Unknown"),
-            "org":             forensics["geo"].get("org", "Unknown"),
-            "severity":        verdict.get("severity", "N/A") if verdict else "PENDING",
-            "action":          verdict.get("action", "N/A") if verdict else "PENDING",
-            "summary":         verdict.get("summary", "") if verdict else "",
-            "detection_label": forensics.get("detection_label", "BRUTE_FORCE"),
-            "abuse_score":     forensics.get("abuse_score", 0),
-            "timing_pattern":  forensics.get("timing_pattern", "INSUFFICIENT_DATA"),
-            "usernames":       "|".join(forensics.get("detected_usernames", [])),
-            "repeat_offender": forensics.get("repeat_offender", False),
-            "anomaly_score":   forensics.get("anomaly_score", ""),
-        })
-    with open(config.TEXT_REPORT_PATH, "a") as f:
-        f.write("=" * 70 + "\n")
-        f.write(f"INCIDENT REPORT - {forensics['timestamp']}\n")
-        f.write("=" * 70 + "\n")
-        f.write(f"Attacker IP     : {forensics['attacker_ip']}\n")
-        f.write(f"Detection Label : {forensics.get('detection_label', 'BRUTE_FORCE')}\n")
-        f.write(f"Failed Attempts : {forensics['failed_attempts']}\n")
-        f.write(f"Country         : {forensics['geo'].get('country', 'Unknown')}\n")
-        f.write(f"ISP             : {forensics['geo'].get('isp', 'Unknown')}\n")
-        f.write(f"Org             : {forensics['geo'].get('org', 'Unknown')}\n")
-        if "anomaly_score" in forensics:
-            f.write(f"Anomaly Score   : {forensics['anomaly_score']}\n")
-            f.write(f"Anomaly Thresh  : {forensics['anomaly_threshold']}\n")
-            f.write(f"ML Phase        : {forensics.get('ml_phase', 'N/A')}\n")
-            f.write(f"Detection Desc  : {forensics.get('detection_description', '')}\n")
-        if verdict:
-            f.write(f"Severity        : {verdict.get('severity', 'N/A')}\n")
-            f.write(f"Action          : {verdict.get('action', 'N/A')}\n")
-            f.write(f"AI Summary      : {verdict.get('summary', '')}\n")
-        f.write("\nOpen Ports at Time of Attack:\n")
-        for p in forensics.get("open_ports", []):
-            f.write(f"  Port {p.get('port','?'):6} | {p.get('address','?')}\n")
-        f.write("\nActive Users at Time of Attack:\n")
-        for u in forensics.get("active_users", []):
-            f.write(f"  {u.get('user','?')} on {u.get('terminal','?')} from {u.get('source','?')}\n")
-        f.write("\nRunning Services at Time of Attack:\n")
-        for s in forensics.get("running_services", []):
-            f.write(f"  {s.get('name','?'):30} | {s.get('description','?')}\n")
-        f.write(f"\nProcess Snapshot:\n{forensics['process_snapshot']}\n")
-        f.write(f"\nRaw Log Sample:\n{forensics['raw_log_sample']}\n")
-        f.write("=" * 70 + "\n\n")
-    print(f"  [+] Reports saved to {config.CSV_REPORT_PATH} and {config.TEXT_REPORT_PATH}")
 
 
 def validate_runtime_config():
