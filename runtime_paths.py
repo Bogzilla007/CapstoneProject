@@ -37,5 +37,16 @@ def as_str(path):
 
 
 def ensure_runtime_dirs():
+    import os as _os
     for path in (REPORTS_DIR, ML_DATA_DIR, MODEL_DIR):
         path.mkdir(parents=True, exist_ok=True)
+        # Least-privilege: setgid + group 'aegis' so both root daemon and
+        # regular dashboard user (who is in the aegis group) can read/write.
+        if _os.name == "posix":
+            try:
+                import grp
+                gid = grp.getgrnam("aegis").gr_gid
+                _os.chown(str(path), -1, gid)  # keep owner, set group
+                _os.chmod(str(path), 0o2775)    # rwxrwsr-x (setgid)
+            except (KeyError, OSError):
+                pass  # aegis group doesn't exist yet or insufficient perms

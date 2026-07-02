@@ -1,8 +1,28 @@
 #!/usr/bin/env sh
 set -e
 
-mkdir -p /var/lib/project-aegis/reports /var/lib/project-aegis/ml_data/model
-chmod 755 /var/lib/project-aegis /var/lib/project-aegis/reports /var/lib/project-aegis/ml_data /var/lib/project-aegis/ml_data/model
+# ── Create dedicated system group for shared data access ───────────────────
+if ! getent group aegis >/dev/null 2>&1; then
+  groupadd --system aegis
+fi
+
+# Add the invoking (non-root) user to the aegis group so the dashboard can
+# read/write daemon data files. SUDO_USER is set when installing via sudo.
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+  usermod -aG aegis "$SUDO_USER" 2>/dev/null || true
+fi
+
+# ── Set up data directories with setgid ────────────────────────────────────
+DATA_DIR="/var/lib/project-aegis"
+mkdir -p "$DATA_DIR/reports" "$DATA_DIR/ml_data/model"
+
+# owner=root, group=aegis, setgid so new files inherit the group
+chown -R root:aegis "$DATA_DIR"
+chmod 2775 "$DATA_DIR" "$DATA_DIR/reports" "$DATA_DIR/ml_data" "$DATA_DIR/ml_data/model"
+
+# Fix permissions on any existing data files (rw-rw-r--)
+find "$DATA_DIR" -type f \( -name '*.csv' -o -name '*.txt' -o -name '*.json' -o -name '*.pkl' \) -exec chmod 664 {} + 2>/dev/null || true
+find "$DATA_DIR" -type f \( -name '*.csv' -o -name '*.txt' -o -name '*.json' -o -name '*.pkl' \) -exec chgrp aegis {} + 2>/dev/null || true
 
 if [ -f /etc/project-aegis/config.py ]; then
   chmod 0644 /etc/project-aegis/config.py
@@ -27,6 +47,6 @@ Next steps:
      sudo nano /etc/project-aegis/config.py
   3. Enable and start the daemon:
      sudo systemctl enable --now aegis-daemon
-  4. Open the desktop console:
+  4. Log out and back in (so the 'aegis' group membership takes effect), then:
      aegis-dashboard
 MSG

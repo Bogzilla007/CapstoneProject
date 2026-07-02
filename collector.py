@@ -89,7 +89,20 @@ def _ensure_csv():
                 "timestamp", "cpu_percent", "ram_percent",
                 "failed_logins", "active_users", "open_ports", "hour_of_day"
             ])
+        # Group-writable so dashboard user (in aegis group) can also read
+        if os.name == "posix":
+            try:
+                os.chmod(CSV_PATH, 0o664)
+            except OSError:
+                pass
         print(f"[COLLECTOR] Created CSV at {CSV_PATH}", flush=True)
+    else:
+        # Fix permissions on existing file if needed
+        if os.name == "posix":
+            try:
+                os.chmod(CSV_PATH, 0o664)
+            except OSError:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

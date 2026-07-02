@@ -61,7 +61,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
-DASHBOARD_VERSION = "0.2.2"
+DASHBOARD_VERSION = "0.2.3"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -505,12 +505,18 @@ class MetricRing(QWidget):
     def __init__(self, label, color=GREEN):
         super().__init__()
         self.value = 0.0
+        self._displayed_value = -1.0  # Track last painted value
         self.label = label
         self.color = QColor(color)
         self.setFixedSize(150, 150)
 
     def set_value(self, value):
-        self.value = max(0.0, min(100.0, float(value)))
+        new_val = max(0.0, min(100.0, float(value)))
+        # Only repaint if value changed by >= 0.5% to avoid redundant draws
+        if abs(new_val - self._displayed_value) < 0.5:
+            return
+        self.value = new_val
+        self._displayed_value = new_val
         self.update()
 
     def paintEvent(self, event):
@@ -574,7 +580,14 @@ class Sparkline(QFrame):
         self.setMaximumHeight(height + 34)
 
     def set_values(self, values):
-        self.values = [float(v) for v in values if pd.notna(v)]
+        new_values = [float(v) for v in values if pd.notna(v)]
+        # Skip repaint if data hasn't changed (same length and same last value)
+        if (len(new_values) == len(self.values)
+                and new_values
+                and self.values
+                and abs(new_values[-1] - self.values[-1]) < 0.01):
+            return
+        self.values = new_values
         self.update()
 
     def paintEvent(self, event):
@@ -1067,20 +1080,25 @@ class Dashboard(QMainWindow):
         self._build_settings()
         self.set_page(0)
 
+        self._current_page = 0  # Track visible page for selective refresh
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start(10_000)
+        self.timer.start(15_000)  # 15-second data refresh (reduced from 10s)
 
         self.telemetry_timer = QTimer(self)
         self.telemetry_timer.timeout.connect(self.refresh_telemetry)
-        self.telemetry_timer.start(3000) # 3-second telemetry updates
+        self.telemetry_timer.start(5000)  # 5-second telemetry updates
         
         self.refresh()
 
     def set_page(self, index):
+        self._current_page = index
         self.stack.setCurrentIndex(index)
         for button in self.nav_buttons:
             button.set_active(button.index == index)
+        # Trigger an immediate refresh for the newly-visible page
+        self.refresh()
 
     def _panel(self, title, widget):
         panel = GlassPanel(title)
@@ -1575,6 +1593,9 @@ class Dashboard(QMainWindow):
             QMessageBox.warning(self, "Update Failed", msg)
 
     def refresh_telemetry(self):
+        # Skip telemetry when window is minimized to save CPU
+        if self.isMinimized():
+            return
         self.clock.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
@@ -1589,23 +1610,43 @@ class Dashboard(QMainWindow):
         if len(self.local_ram_history) > 120:
             self.local_ram_history = self.local_ram_history[-120:]
 
-        self.cpu_chart.set_values(self.local_cpu_history)
-        self.ram_chart.set_values(self.local_ram_history)
+        # Only repaint charts if overview page (page 0) is visible
+        if self._current_page == 0:
+            self.cpu_chart.set_values(self.local_cpu_history)
+            self.ram_chart.set_values(self.local_ram_history)
 
     def refresh(self):
+        # Skip refresh when window is minimized to save CPU
+        if self.isMinimized():
+            return
+        page = self._current_page
+        # Always load incidents (lightweight) for stat card count
         incidents = load_incidents()
-        metrics = load_metrics()
-        scores = load_scores()
-        blocks = load_blocklist()
-        meta = load_metadata()
-        self._refresh_overview(incidents, metrics, blocks, meta)
-        self._refresh_incidents(incidents)
-        self._refresh_ml(scores, meta)
-        self._refresh_timeline(incidents)
-        self._refresh_blocks(blocks)
+        # Only load heavy data for the pages that need it
+        if page == 0:  # Overview
+            metrics = load_metrics()
+            blocks = load_blocklist()
+            meta = load_metadata()
+            self._refresh_overview(incidents, metrics, blocks, meta)
+        elif page == 1:  # Incidents
+            self._refresh_incidents(incidents)
+        elif page == 2:  # ML
+            scores = load_scores()
+            meta = load_metadata()
+            self._refresh_ml(scores, meta)
+        elif page == 3:  # Timeline
+            self._refresh_timeline(incidents)
+        elif page == 4:  # Blocks
+            blocks = load_blocklist()
+            self._refresh_blocks(blocks)
 
     def _refresh_overview(self, incidents, metrics, blocks, meta):
-        status = service_status()
+        # Cache daemon status to avoid spawning a subprocess every refresh
+        now = time.time()
+        if not hasattr(self, '_cached_status') or now - self._cached_status_time > 30:
+            self._cached_status = service_status()
+            self._cached_status_time = now
+        status = self._cached_status
         self.daemon_pill.setText(f"Daemon: {status}")
         self.daemon_pill.setProperty("state", "good" if status == "active" else "bad")
         self.daemon_pill.style().unpolish(self.daemon_pill)

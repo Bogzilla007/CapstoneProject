@@ -55,6 +55,11 @@ def save_to_blocklist(ip, severity, summary, expiry_seconds=0):
     expiry_ts = time.time() + expiry_seconds if expiry_seconds > 0 else 0
     with open(BLOCKLIST_PATH, "a") as f:
         f.write(f"{ip},{severity},{timestamp},{expiry_ts},{summary[:80]}\n")
+    if os.name == "posix":
+        try:
+            os.chmod(BLOCKLIST_PATH, 0o664)
+        except OSError:
+            pass
 
 def get_active_blocks():
     """Returns dict of IPs that are currently blocked and not expired."""
@@ -300,6 +305,23 @@ def _ensure_parent_dir(path):
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+        if os.name == "posix":
+            try:
+                import grp
+                gid = grp.getgrnam("aegis").gr_gid
+                os.chown(parent, -1, gid)
+                os.chmod(parent, 0o2775)  # rwxrwsr-x (setgid)
+            except (KeyError, OSError):
+                pass
+
+
+def _fix_file_perms(path):
+    """Make data file group-writable for aegis group members."""
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o664)  # rw-rw-r--
+        except OSError:
+            pass
 
 def save_reports(forensics, verdict=None):
     _ensure_parent_dir(config.CSV_REPORT_PATH)
@@ -361,6 +383,8 @@ def save_reports(forensics, verdict=None):
         f.write(f"\nProcess Snapshot:\n{forensics.get('process_snapshot', 'N/A')}\n")
         f.write(f"\nRaw Log Sample:\n{forensics.get('raw_log_sample', 'N/A')}\n")
         f.write("=" * 70 + "\n\n")
+    _fix_file_perms(config.CSV_REPORT_PATH)
+    _fix_file_perms(config.TEXT_REPORT_PATH)
     print(f"  [+] Reports saved to {config.CSV_REPORT_PATH} and {config.TEXT_REPORT_PATH}")
 
 # ─── Master Mitigation Handler ─────────────────────────────────────────────────

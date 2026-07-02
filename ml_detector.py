@@ -60,6 +60,12 @@ def _log_score(score, is_anomaly):
                 is_anomaly,
                 round(_threshold, 8),
             ])
+        # Group-writable so dashboard user (in aegis group) can read
+        if os.name == "posix":
+            try:
+                os.chmod(SCORES_CSV, 0o664)
+            except OSError:
+                pass
     except Exception:
         pass   # never let logging break inference
 
