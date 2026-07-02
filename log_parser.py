@@ -27,7 +27,8 @@ RE_SUCCESS = re.compile(
 
 # sudo failure
 RE_SUDO_FAIL = re.compile(
-    r"sudo:.*authentication failure.*user=(\S+)"
+    r"pam_unix\(sudo:auth\): authentication failure;.*?(?:ruser=(\S+)|user=(\S+))|"
+    r"sudo:\s*(\S+)\s*:\s*(?:\d+ incorrect password attempts?|auth failure|authentication failure)"
 )
 
 # sudo success (privilege use)
@@ -81,7 +82,8 @@ def parse_line(line):
     m = RE_SUDO_FAIL.search(line)
     if m:
         result["event_type"] = "SUDO_FAIL"
-        result["username"] = m.group(1).lower()
+        matched_user = next((g for g in m.groups() if g), None)
+        result["username"] = matched_user.lower() if matched_user else "unknown"
         return result
 
     m = RE_SUDO_OK.search(line)

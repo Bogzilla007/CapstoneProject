@@ -285,7 +285,34 @@ def rule_engine_thread():
             ip = parsed.get("ip")
             event_type = parsed.get("event_type")
 
-            # Track all parsed events per IP for threat classification
+            # Intercept local privilege escalation attempts
+            if event_type == "SUDO_FAIL":
+                local_ip = "127.0.0.1"
+                user = parsed.get("username", "unknown")
+                print(f"  [!] Local sudo failure detected for user: {user}")
+                trainer.register_incident()
+                
+                ip_parsed_events[local_ip].append(parsed)
+                
+                extra_context = {
+                    "detected_usernames": [user],
+                    "privileged_targets": ["root"],
+                    "threat_labels": ["PRIV_ESC_ATTEMPT"],
+                    "sudo_failures": 1
+                }
+                
+                threading.Thread(
+                    target=run_pipeline,
+                    args=(local_ip, "PRIV_ESC_ATTEMPT"),
+                    kwargs={
+                        "failed_count": 1,
+                        "raw_log_lines": [line.strip()],
+                        "extra_context": extra_context
+                    },
+                    daemon=True
+                ).start()
+                continue
+
             if ip:
                 ip_parsed_events[ip].append(parsed)
 

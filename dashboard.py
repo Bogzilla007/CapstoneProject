@@ -61,7 +61,7 @@ except ImportError as exc:
     print("Install it with: pip install PySide6 --break-system-packages")
     raise SystemExit(1) from exc
 
-DASHBOARD_VERSION = "0.2.0"
+DASHBOARD_VERSION = "0.2.1"
 
 runtime_paths.ensure_runtime_dirs()
 
@@ -1007,9 +1007,20 @@ class Dashboard(QMainWindow):
         self.update_btn.setVisible(False)
         self.update_btn.clicked.connect(self._run_update)
 
+        self.retry_update_btn = QPushButton("Retry Check 🔄")
+        self.retry_update_btn.setObjectName("RetryUpdateBtn")
+        self.retry_update_btn.setCursor(Qt.PointingHandCursor)
+        self.retry_update_btn.setStyleSheet(
+            "QPushButton#RetryUpdateBtn { padding: 5px 10px; font-size: 10px; font-weight: bold; background: rgba(255, 255, 255, 15); border-color: rgba(255, 255, 255, 30); }"
+            "QPushButton#RetryUpdateBtn:hover { background: rgba(255, 255, 255, 25); }"
+        )
+        self.retry_update_btn.setVisible(False)
+        self.retry_update_btn.clicked.connect(self._retry_check_for_updates)
+
         update_layout.addWidget(self.version_label)
         update_layout.addWidget(self.update_status)
         update_layout.addWidget(self.update_btn)
+        update_layout.addWidget(self.retry_update_btn)
         self.nav.outer.addWidget(self.update_panel)
 
         self.daemon_pill = QLabel("Daemon: unknown")
@@ -1533,6 +1544,19 @@ class Dashboard(QMainWindow):
         if new_version:
             self.update_btn.setVisible(True)
             self.update_btn.setText(f"Update to v{new_version}")
+            self.retry_update_btn.setVisible(False)
+        else:
+            self.update_btn.setVisible(False)
+            if "failed" in status.lower() or "error" in status.lower() or "unable" in status.lower():
+                self.retry_update_btn.setVisible(True)
+            else:
+                self.retry_update_btn.setVisible(False)
+
+    def _retry_check_for_updates(self):
+        self.retry_update_btn.setVisible(False)
+        self.update_status.setText("Checking updates...")
+        self.update_status.repaint()
+        self._check_for_updates()
 
     def _run_update(self):
         self.update_btn.setEnabled(False)
